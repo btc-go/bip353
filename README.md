@@ -1,6 +1,5 @@
-# bip353-go
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/bip353/bip353-go.svg)](https://pkg.go.dev/github.com/bip353/bip353-go)
+[![Go Reference](https://pkg.go.dev/badge/github.com/btc-go/bip353.svg)](https://pkg.go.dev/github.com/btc-go/bip353)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A Go implementation of [BIP-353: DNS Payment Instructions](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki).
@@ -33,12 +32,12 @@ BIP-353 maps human-readable addresses like **₿alice@example.com** to Bitcoin p
 ## Installation
 
 ```bash
-go get github.com/bip353/bip353-go
+go get github.com/btc-go/bip353
 ```
 
 **CLI tool:**
 ```bash
-go install github.com/bip353/bip353-go/examples/cli@latest
+go install github.com/btc-go/bip353/examples/cli@latest
 ```
 
 ---
@@ -53,7 +52,7 @@ import (
     "fmt"
     "log"
 
-    bip353 "github.com/bip353/bip353-go"
+    bip353 "github.com/btc-go/bip353"
 )
 
 func main() {
@@ -408,7 +407,7 @@ Please do not file public GitHub issues for security vulnerabilities. Contact th
 ## Architecture
 
 ```
-github.com/bip353/bip353-go/
+github.com/btc-go/bip353/
 ├── bip353.go              # Public API (re-exports, convenience constructors)
 ├── bip353_test.go         # Tests (mock transport for unit tests)
 │
