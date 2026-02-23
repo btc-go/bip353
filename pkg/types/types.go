@@ -130,6 +130,7 @@ type PaymentInstruction struct {
 	PaymentType          PaymentType
 	IsReusable           bool
 	DNSSECValidated      bool
+	TTL                  uint32
 	OnChainAddress       string
 	// OnChainAddresses holds all bc= values (segwit v0, v1, etc.)
 	// per BIP-321 multiple bc= params are valid
@@ -140,6 +141,8 @@ type PaymentInstruction struct {
 	SilentPaymentAddress string
 	SilentPaymentDetails *SilentPaymentDetails
 	ExtraParams          map[string]string
+	
+
 }
 
 type BOLT12OfferDetails struct {

@@ -96,6 +96,8 @@ func (r *Resolver) ResolveHRA(ctx context.Context, hra types.HumanReadableAddres
 	inst.OriginalAddress = hra
 	inst.DNSSECValidated = qResult.Authenticated
 	inst.RawTXTRecord = rawRecord
+	inst.TTL = qResult.TTL  
+
 	return inst, nil
 }
 
@@ -184,6 +186,9 @@ func FormatSummary(inst *types.PaymentInstruction) string {
 	fmt.Fprintf(&b, "Payment type:     %s\n", inst.PaymentType)
 	fmt.Fprintf(&b, "Reusable:         %v\n", inst.IsReusable)
 	fmt.Fprintf(&b, "DNSSEC validated: %v\n", inst.DNSSECValidated)
+	if inst.TTL > 0 {
+		fmt.Fprintf(&b, "DNS TTL:          %ds\n", inst.TTL)
+	}
 	if inst.BOLT12Offer != "" {
 		fmt.Fprintf(&b, "BOLT-12 offer:    %s\n", trunc(inst.BOLT12Offer, 60))
 		if d := inst.BOLT12Details; d != nil {

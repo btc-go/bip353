@@ -1,4 +1,3 @@
-
 [![Go Reference](https://pkg.go.dev/badge/github.com/btc-go/bip353.svg)](https://pkg.go.dev/github.com/btc-go/bip353)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -12,20 +11,21 @@ BIP-353 maps human-readable addresses like **₿alice@example.com** to Bitcoin p
 
 | Feature | Status |
 |---------|--------|
-| BIP-353 resolution (DNSSEC required by default) | Done |
-| BOLT-12 offer decoding (full TLV stream parser) | Done |
-| BIP-352 Silent Payment address decoding | Done |
-| BOLT-11 invoice support | Done |
-| On-chain addresses (P2PKH, P2SH, P2WPKH, P2TR) | Done |
-| BIP-321 `bc=` native segwit param (multiple values) | Done |
-| BIP-321 `req-` required parameter rejection | Done |
-| BIP-321 case-insensitive query parameter keys | Done |
-| DNS-over-HTTPS (RFC 8484, binary wire + JSON) | Done |
-| Tor-routed DNS (SOCKS5 + DoH) | Done |
-| Standard UDP/TCP with DNSSEC-validating resolvers | Done |
-| Typed error sentinels (`errors.Is` compatible) | Done |
-| BIP-21 URI builder for publishing records | Done |
-| CLI tool (`bip353`) | Done |
+| BIP-353 resolution (DNSSEC required by default) | ✅ |
+| DNS TTL enforcement per BIP-353 spec | ✅ |
+| BOLT-12 offer decoding (full TLV stream parser) | ✅ |
+| BIP-352 Silent Payment address decoding | ✅ |
+| BOLT-11 invoice support | ✅ |
+| On-chain addresses (P2PKH, P2SH, P2WPKH, P2TR) | ✅ |
+| BIP-321 `bc=` native segwit param (multiple values) | ✅ |
+| BIP-321 `req-` required parameter rejection | ✅ |
+| BIP-321 case-insensitive query parameter keys | ✅ |
+| DNS-over-HTTPS (RFC 8484, binary wire + JSON) | ✅ |
+| Tor-routed DNS (SOCKS5 + DoH) | ✅ |
+| Standard UDP/TCP with DNSSEC-validating resolvers | ✅ |
+| Typed error sentinels (`errors.Is` compatible) | ✅ |
+| BIP-21 URI builder for publishing records | ✅ |
+| CLI tool (`bip353`) | ✅ |
 
 ---
 
@@ -37,7 +37,7 @@ go get github.com/btc-go/bip353
 
 **CLI tool:**
 ```bash
-go install github.com/btc-go/bip353/examples/cli@latest
+go install github.com/btc-go/bip353/cmd/bip353@latest
 ```
 
 ---
@@ -51,6 +51,7 @@ import (
     "context"
     "fmt"
     "log"
+    "time"
 
     bip353 "github.com/btc-go/bip353"
 )
@@ -69,6 +70,10 @@ func main() {
         log.Fatal(err)
     }
 
+    // Respect the DNS TTL when caching
+    cacheFor := time.Duration(inst.TTL) * time.Second
+    fmt.Printf("Cache this result for: %s\n", cacheFor)
+
     switch inst.PaymentType {
     case bip353.PaymentTypeLightningBOLT12:
         fmt.Println("Pay via BOLT-12 offer:", inst.BOLT12Offer)
@@ -86,7 +91,6 @@ func main() {
         fmt.Println("Pay via BOLT-11 invoice:", inst.BOLT11Invoice)
     case bip353.PaymentTypeOnChain:
         fmt.Println("Pay on-chain:", inst.OnChainAddress)
-        // Multiple segwit addresses may be present (e.g. P2WPKH + P2TR)
         for _, addr := range inst.OnChainAddresses {
             fmt.Println("  segwit address:", addr)
         }
@@ -100,7 +104,7 @@ func main() {
 
 ### Classic DNS (default)
 
-Uses UDP/TCP to well-known DNSSEC-validating public resolvers (Cloudflare 1.1.1.1, Google 8.8.8.8, Quad9 9.9.9.9). Fastest option. Your ISP may observe DNS query names (but cannot forge responses without breaking DNSSEC).
+Uses UDP/TCP to well-known DNSSEC-validating public resolvers (Cloudflare 1.1.1.1, Google 8.8.8.8, Quad9 9.9.9.9). Fastest option. Your ISP may observe DNS query names but cannot forge responses without breaking DNSSEC.
 
 ```go
 r, _ := bip353.NewSecure()
@@ -121,7 +125,7 @@ r, _ := bip353.New(opts)
 Hides DNS query names from your ISP and any on-path network observer. The DoH server operator can see your queries but not your IP if combined with Tor.
 
 ```go
-// Using a named provider:
+// Named provider:
 r, _ := bip353.NewWithDoH("cloudflare") // or "google", "quad9", "nextdns"
 
 // Custom DoH endpoint:
@@ -164,7 +168,7 @@ r, _ := bip353.NewWithTor("127.0.0.1:9150", "cloudflare")
 
 ## BOLT-12 TLV Decoding
 
-The library decodes BOLT-12 offer TLV streams from the bech32m-encoded offer string. This covers all standardized fields in the [BOLT-12 spec](https://github.com/lightning/bolts/blob/master/12-offer-encoding.md):
+The library decodes BOLT-12 offer TLV streams from the bech32m-encoded offer string, covering all standardized fields in the [BOLT-12 spec](https://github.com/lightning/bolts/blob/master/12-offer-encoding.md):
 
 ```go
 inst, _ := r.Resolve(ctx, "₿merchant@shop.example.com")
@@ -221,12 +225,10 @@ The decoder validates:
 
 ## Multi-Payment Records
 
-A single BIP-353 record may contain multiple payment methods. The library always
-populates all recognized fields — not just the highest-priority one — so callers
-can fall back gracefully:
+A single BIP-353 record may contain multiple payment methods. The library populates all recognized fields so callers can fall back gracefully:
 
 ```go
-inst, _ := r.Resolve(ctx, "₿tips@bip353.com")
+inst, _ := r.Resolve(ctx, "₿tips@example.com")
 
 // Primary: BOLT-12 (highest priority)
 fmt.Println("BOLT-12:", inst.BOLT12Offer)
@@ -268,8 +270,7 @@ Publish as a DNS TXT record (zone must be DNSSEC-signed):
 alice.user._bitcoin-payment.example.com. 300 IN TXT "bitcoin:bc1q...?lno=lno1..."
 ```
 
-> **Note:** The DNS name format is `<user>.user._bitcoin-payment.<domain>.` — note
-> `_bitcoin-payment`, not `_bitcoin._dns`. This is the format specified in BIP-353.
+> **Note:** The DNS label is `_bitcoin-payment`, not `_bitcoin._dns`. This is the exact format specified in BIP-353.
 
 ---
 
@@ -281,14 +282,14 @@ Use `errors.Is` to detect specific failure conditions:
 inst, err := r.Resolve(ctx, "₿alice@example.com")
 switch {
 case errors.Is(err, bip353.ErrNXDOMAIN):
-    // The user is not registered; no DNS record exists.
+    // No DNS record exists for this user.
 case errors.Is(err, bip353.ErrDNSSECRequired):
-    // The domain's DNS zone is not DNSSEC-signed, or the resolver
-    // returned an unauthenticated response.
+    // DNS zone is not DNSSEC-signed, or resolver returned unauthenticated response.
+    // Do NOT fall back silently — this may indicate an active spoofing attack.
 case errors.Is(err, bip353.ErrAmbiguousRecord):
-    // Multiple BIP-353 TXT records found; DNS misconfiguration.
+    // Multiple BIP-353 TXT records found — DNS misconfiguration.
 case errors.Is(err, bip353.ErrNoRecord):
-    // A DNS name exists but has no "bitcoin:" TXT record.
+    // DNS name exists but has no "bitcoin:" TXT record.
 case errors.Is(err, bip353.ErrRequiredParam):
     // URI contains a req- prefixed parameter this library does not understand.
     // Per BIP-321 the entire URI must be rejected.
@@ -297,7 +298,7 @@ case err != nil:
 }
 ```
 
-**Do not silently fall back to an insecure resolver if `ErrDNSSECRequired` is returned.** This error may indicate an active DNS spoofing attack. Surface it to the user.
+**Do not silently fall back to an insecure resolver if `ErrDNSSECRequired` is returned.** This may indicate an active DNS spoofing attack. Surface it to the user.
 
 ---
 
@@ -312,72 +313,64 @@ COMMANDS:
   dnsname <address>    Print the BIP-353 DNS TXT record name
   build [flags]        Build a BIP-21 URI for a DNS TXT record
   decode <value>       Decode a BOLT-12 offer or silent payment address
+  help                 Show this help
+
+RESOLVE FLAGS:
+  --transport <spec>       classic | doh:<provider> | tor:<provider>
+  --tor-proxy <host:port>  Tor SOCKS5 proxy (default: 127.0.0.1:9050)
+  --insecure               Disable DNSSEC (NOT safe for production)
+  --timeout <duration>     Query timeout (default: 10s)
+  --verbose                Show full decoded fields including DNS TTL
 ```
 
 Examples:
 
 ```bash
-# Resolve with default transport:
 bip353 resolve ₿alice@example.com
-
-# Resolve with DoH:
 bip353 resolve --transport doh:cloudflare ₿alice@example.com
-
-# Resolve through Tor + DoH:
 bip353 resolve --transport tor:cloudflare ₿alice@example.com
-
-# Show full decoded fields (BOLT-12 details, silent payment keys, etc.):
 bip353 resolve --verbose ₿alice@example.com
-
-# Print the DNS name (for manual dig verification):
 bip353 dnsname ₿alice@example.com
-# → alice.user._bitcoin-payment.example.com.
-
-# Build a TXT record value:
-bip353 build --address bc1q... --bolt12 lno1... --bolt11 lnbc1...
-
-# Decode a BOLT-12 offer:
+bip353 build --address bc1q... --bolt12 lno1...
 bip353 decode lno1qcpjkuepqyz5z...
-
-# Decode a silent payment address:
 bip353 decode sp1qqgmrp7a...
 ```
 
-### Live test addresses / Working Examples
+### Live test addresses
 
-These are real BIP-353 records you can use to verify the library is working:
+These are real published BIP-353 records verified against this library:
+
 ```bash
-# BOLT-12 offer with DNSSEC:
+# The BIP author's own address — BOLT-12 + on-chain, DNSSEC validated:
 $ bip353 resolve ₿matt@mattcorallo.com
-Resolved: ₿matt@mattcorallo.com
+Address:  ₿matt@mattcorallo.com
 Type:     lightning_bolt12
 Reusable: true
 DNSSEC:   true
 Offer:    lno1zr5qyugqgskrk70kqmuq7v3dnr2fnmhukps9n8hut48vkqpqnskt...
 
-# On-chain via bc= param — record has an intentional junk TXT entry that must be ignored:
-$ bip353 resolve ₿simple@dnssec_proof_tests.bitcoin.ninja
-Resolved: ₿simple@dnssec_proof_tests.bitcoin.ninja
-Type:     onchain
-Reusable: false
-DNSSEC:   true
-Address:  bc1qztwy6xen3zdtt7z0vrgapmjtfz8acjkfp5fp7l
+# Verbose output showing full fields including DNS TTL:
+$ bip353 resolve --verbose ₿matt@mattcorallo.com
+Address:          ₿matt@mattcorallo.com
+Payment type:     lightning_bolt12
+Reusable:         true
+DNSSEC validated: true
+DNS TTL:          3600s
+BOLT-12 offer:    lno1zr5qyugqgskrk70kqmuq7v3dnr2fnmhukps9n8hut48vkqpqnskt...
+On-chain address: bc1qztwy6xen3zdtt7z0vrgapmjtfz8acjkfp5fp7l
 
-# BOLT-12 + silent payment + on-chain in a single record:
-$ bip353 resolve ₿tips@bip353.com
-Resolved: ₿tips@bip353.com
-Type:     lightning_bolt12
-Reusable: true
-DNSSEC:   true
-Offer:    lno1zrxq8pjw7qjlm68mtp7e3yvxee4y5xrgjhhyf2fxhlphpckrvevh...
-
-# Two conflicting bitcoin: TXT records — must error:
-$ bip353 resolve ₿invalid@dnssec_proof_tests.bitcoin.ninja
-error: bip353: multiple BIP-353 TXT records found at invalid.user._bitcoin-payment.dnssec_proof_tests.bitcoin.ninja. (2 records)
-
-# Domain without DNSSEC — must error:
+# Domain without DNSSEC — correctly rejected:
 $ bip353 resolve ₿bitnomad@blink.sv
 error: bip353: DNSSEC validation required: AD bit not set (name: bitnomad.user._bitcoin-payment.blink.sv., transport: classic)
+
+# --insecure bypasses DNSSEC but record must still exist:
+$ bip353 resolve --insecure ₿bitnomad@blink.sv
+error: bip353: no BIP-353 TXT record found at bitnomad.user._bitcoin-payment.blink.sv.
+
+# Verify a DNS name manually with dig:
+$ bip353 dnsname ₿matt@mattcorallo.com
+matt.user._bitcoin-payment.mattcorallo.com.
+$ dig TXT matt.user._bitcoin-payment.mattcorallo.com.
 ```
 
 ---
@@ -388,14 +381,17 @@ error: bip353: DNSSEC validation required: AD bit not set (name: bitnomad.user._
 
 BIP-353 requires DNSSEC to prevent DNS spoofing. This library checks the **AD (Authenticated Data) bit** in DNS responses, which a DNSSEC-validating recursive resolver sets after verifying the full DNSSEC chain from root → TLD → zone.
 
-- Default public resolvers (Cloudflare, Google, Quad9) all perform DNSSEC validation.
+- Default public resolvers (Cloudflare, Google, Quad9) all perform full DNSSEC validation.
 - If you use your own resolver, ensure it validates DNSSEC and sets the AD bit.
-- `NewInsecure()` is provided for test environments only. **Never use in production.**
+- `AllowInsecure: true` is for test environments only. **Never use in production.**
+
+### TTL enforcement
+
+Per BIP-353, clients must not cache payment instructions longer than the DNS TTL. This library exposes `inst.TTL` (in seconds) on every resolved `PaymentInstruction`. Callers are responsible for respecting it when caching results.
 
 ### What DNSSEC does NOT protect against
 
 - A compromised DNSSEC-validating resolver lying about the AD bit.
-- Side-channel timing attacks.
 - Cryptographic signature verification of BOLT-12 offers (requires a full Lightning node).
 
 ### Reporting vulnerabilities
@@ -416,15 +412,15 @@ github.com/btc-go/bip353/
 │   ├── bolt12/            # BOLT-12 TLV decoder (bech32m → TLV stream → fields)
 │   ├── silentpayment/     # BIP-352 address decoder (bech32m → scan/spend keys)
 │   ├── resolver/          # BIP-353 resolution logic
-│   └── bip21/             # BIP-21 URI builder
+│   └── builder/             # BIP-21 URI builder
 │
 ├── transport/
 │   ├── transport.go       # Transport interface + ClassicTransport (UDP/TCP)
 │   ├── doh.go             # DoHTransport (RFC 8484, wire + JSON)
 │   └── tor.go             # TorTransport (SOCKS5 + DoH)
 │
-└── examples/
-    └── cli/               # bip353 CLI tool
+└── cmd/
+    └── bip353/               # bip353 CLI tool
 ```
 
 **Design principles:**
@@ -432,8 +428,8 @@ github.com/btc-go/bip353/
 - All errors are typed and wrap `errors.Is`-compatible sentinel values.
 - No global state; all configuration is per-`Resolver`.
 - BOLT-12 and Silent Payment decoding are non-fatal: the raw string is always available.
-- BIP-321 compliance: case-insensitive query keys, `req-` param rejection, multiple `bc=` values.
-- `min()` built-in requires Go 1.21+ (specified in `go.mod`).
+- DNS TTL is propagated to callers — never silently discarded.
+- Requires Go 1.21+.
 
 ---
 
@@ -441,11 +437,10 @@ github.com/btc-go/bip353/
 
 | Package | Purpose |
 |---------|---------|
-| `github.com/miekg/dns` | DNS wire-format encoding/decoding (ClassicTransport, DoH wire format) |
+| `github.com/miekg/dns` | DNS wire-format encoding/decoding |
 | `golang.org/x/net` | `proxy.SOCKS5` for Tor routing |
-| `golang.org/x/crypto` | (transitive) |
 
-The BOLT-12 bech32m decoder and BigSize integer parser are implemented from scratch with zero external dependencies.
+The BOLT-12 bech32m decoder and BigSize integer parser are implemented from scratch with no external dependencies.
 
 ---
 
@@ -459,7 +454,7 @@ MIT. See [LICENSE](LICENSE).
 
 - [BIP-353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki): DNS Payment Instructions
 - [BIP-352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki): Silent Payments
-- [BIP-321](https://github.com/bitcoin/bips/blob/master/bip-0321.mediawiki): URI Scheme (replaces BIP-21)
+- [BIP-321](https://github.com/bitcoin/bips/blob/master/bip-0321.mediawiki): URI Scheme
 - [BOLT-12](https://github.com/lightning/bolts/blob/master/12-offer-encoding.md): Offer Protocol
 - [RFC 8484](https://www.rfc-editor.org/rfc/rfc8484): DNS Queries over HTTPS (DoH)
 - [BOLT-01 TLV](https://github.com/lightning/bolts/blob/master/01-messaging.md#type-length-value-format): BigSize and TLV format

@@ -15,6 +15,7 @@ type QueryResult struct {
 	Records       []string
 	Authenticated bool
 	Transport     string
+	TTL           uint32
 }
 
 type Transport interface {
@@ -93,16 +94,27 @@ func parseResponse(resp *dns.Msg, transportName string) (*QueryResult, error) {
 	if resp.Rcode != dns.RcodeSuccess {
 		return nil, fmt.Errorf("DNS error: %s", dns.RcodeToString[resp.Rcode])
 	}
-	result := &QueryResult{Authenticated: resp.AuthenticatedData, Transport: transportName}
+	result := &QueryResult{
+		Authenticated: resp.AuthenticatedData,
+		Transport:     transportName,
+		TTL:           ^uint32(0),
+	}
 	for _, rr := range resp.Answer {
 		txt, ok := rr.(*dns.TXT)
 		if !ok {
 			continue
 		}
+		if rr.Header().Ttl < result.TTL {
+			result.TTL = rr.Header().Ttl
+		}
 		result.Records = append(result.Records, joinTXT(txt.Txt))
+	}
+	if result.TTL == ^uint32(0) {
+		result.TTL = 0
 	}
 	return result, nil
 }
+
 
 func joinTXT(parts []string) string {
 	switch len(parts) {
