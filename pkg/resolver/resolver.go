@@ -1,13 +1,12 @@
-// Resolver logic is tested via the public API in the root package.
-// See bip353_test.go and integration_test.go
-
 package resolver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
+	"github.com/btc-go/bip353/internal/dnssec"
 	"github.com/btc-go/bip353/pkg/bolt12"
 	"github.com/btc-go/bip353/pkg/silentpayment"
 	"github.com/btc-go/bip353/pkg/types"
@@ -16,17 +15,30 @@ import (
 
 const maxTXTLength = 8192
 
+var knownParams = map[string]bool{
+	"lno":       true,
+	"lightning": true,
+	"sp":        true,
+	"bc":        true,
+	"tb":        true,
+	"pay":       true,
+	"pj":        true,
+	"pjos":      true,
+	"amount":    true,
+	"label":     true,
+	"message":   true,
+	"pop":       true,
+}
+
 type Options struct {
 	Transport           transport.Transport
-	RequireDNSSEC       bool
-	AllowInsecure       bool
 	DecodeBOLT12        bool
 	DecodeSilentPayment bool
+	PreferExplicit      func(address types.HumanReadableAddress) *types.PaymentInstruction
 }
 
 func DefaultOptions() Options {
 	return Options{
-		RequireDNSSEC:       true,
 		DecodeBOLT12:        true,
 		DecodeSilentPayment: true,
 	}
@@ -40,10 +52,7 @@ type Resolver struct {
 func New(opts Options) *Resolver {
 	t := opts.Transport
 	if t == nil {
-		t = transport.NewClassicTransport()
-	}
-	if opts.AllowInsecure {
-		opts.RequireDNSSEC = false
+		t = transport.NewFullValidationTransport()
 	}
 	return &Resolver{transport: t, opts: opts}
 }
@@ -64,15 +73,12 @@ func (r *Resolver) ResolveHRA(ctx context.Context, hra types.HumanReadableAddres
 	dnsName := hra.DNSName()
 	qResult, err := r.transport.LookupTXT(ctx, dnsName)
 	if err != nil {
-		if strings.Contains(err.Error(), "NXDOMAIN") {
+		if isNXDOMAIN(err) {
 			return nil, fmt.Errorf("bip353: %w", types.ErrNXDOMAIN)
 		}
 		return nil, fmt.Errorf("bip353: DNS lookup for %s: %w", dnsName, err)
 	}
-	if r.opts.RequireDNSSEC && !qResult.Authenticated {
-		return nil, fmt.Errorf("bip353: %w (name: %s, transport: %s)",
-			types.ErrDNSSECRequired, dnsName, qResult.Transport)
-	}
+
 	var bip353Records []string
 	for _, rec := range qResult.Records {
 		if strings.HasPrefix(strings.ToLower(rec), "bitcoin:") {
@@ -88,34 +94,28 @@ func (r *Resolver) ResolveHRA(ctx context.Context, hra types.HumanReadableAddres
 	if len(bip353Records) > 1 {
 		return nil, fmt.Errorf("bip353: %w at %s (%d records)", types.ErrAmbiguousRecord, dnsName, len(bip353Records))
 	}
+
 	rawRecord := bip353Records[0]
 	inst, err := r.buildInstruction(rawRecord)
 	if err != nil {
 		return nil, fmt.Errorf("bip353: parsing record at %s: %w", dnsName, err)
 	}
 	inst.OriginalAddress = hra
-	inst.DNSSECValidated = qResult.Authenticated
+	inst.DNSSECValidated = true
 	inst.RawTXTRecord = rawRecord
-	inst.TTL = qResult.TTL  
+	inst.TTL = qResult.TTL
 
 	return inst, nil
 }
 
-// knownParams are BIP-321 defined keys that should not appear in ExtraParams.
-var knownParams = map[string]bool{
-	"lno":       true,
-	"lightning": true,
-	"sp":        true,
-	"bc":        true,
-	"tb":        true, // testnet segwit
-	"pay":       true, // BIP-351 private payments
-	"pj":        true, // payjoin
-	"pjos":      true, // payjoin output substitution
-	"amount":    true,
-	"label":     true,
-	"message":   true,
-	"pop":       true,
-	"req-pop":   true,
+// isNXDOMAIN detects NXDOMAIN from dnssec-prover's error strings.
+// dnssec-prover returns "NoSuchName" for NXDOMAIN and "NXDOMAIN" from
+// the transport layer for plain DNS responses.
+func isNXDOMAIN(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "NoSuchName") ||
+		strings.Contains(s, "NXDOMAIN") ||
+		strings.Contains(s, "no such name")
 }
 
 func (r *Resolver) buildInstruction(raw string) (*types.PaymentInstruction, error) {
@@ -135,16 +135,12 @@ func (r *Resolver) buildInstruction(raw string) (*types.PaymentInstruction, erro
 		OnChainAddress: parsed.Address,
 	}
 
-	// bc= carries native segwit addresses per BIP-321.
-	// Multiple values are valid (e.g. one segwit v0 + one segwit v1).
-	// OnChainAddress holds the first for convenience; OnChainAddresses holds all.
 	if bcVals := parsed.Params["bc"]; len(bcVals) > 0 {
 		inst.OnChainAddresses = bcVals
 		if inst.OnChainAddress == "" {
 			inst.OnChainAddress = bcVals[0]
 		}
 	}
-
 	if lno := parsed.Params.Get("lno"); lno != "" {
 		inst.BOLT12Offer = lno
 		if r.opts.DecodeBOLT12 {
@@ -236,3 +232,51 @@ func trunc(s string, n int) string {
 	}
 	return s[:n] + "…"
 }
+
+func ParseVerifiedProof(proofBytes []byte, hra types.HumanReadableAddress) (*types.PaymentInstruction, error) {
+    expectedName := hra.DNSName()
+
+    resultJSON := dnssec.VerifyByteStream(proofBytes, expectedName)
+
+    var vr struct {
+        Error       string `json:"error"`
+        MaxCacheTTL uint32 `json:"max_cache_ttl"`
+        VerifiedRRs []struct {
+            Type     string `json:"type"`
+            Contents string `json:"contents"`
+        } `json:"verified_rrs"`
+    }
+    if err := json.Unmarshal([]byte(resultJSON), &vr); err != nil {
+        return nil, fmt.Errorf("bip353: failed to parse proof result: %w", err)
+    }
+    if vr.Error != "" {
+        return nil, fmt.Errorf("bip353: DNSSEC validation failed: %s", vr.Error)
+    }
+
+    var bip353Records []string
+    for _, rr := range vr.VerifiedRRs {
+        if rr.Type == "txt" && strings.HasPrefix(strings.ToLower(rr.Contents), "bitcoin:") {
+            bip353Records = append(bip353Records, rr.Contents)
+        }
+    }
+    if len(bip353Records) == 0 {
+        return nil, fmt.Errorf("bip353: %w at %s", types.ErrNoRecord, expectedName)
+    }
+    if len(bip353Records) > 1 {
+        return nil, fmt.Errorf("bip353: %w at %s (%d records)", types.ErrAmbiguousRecord, expectedName, len(bip353Records))
+    }
+
+    r := &Resolver{opts: DefaultOptions()}
+    rawRecord := bip353Records[0]
+    inst, err := r.buildInstruction(rawRecord)
+    if err != nil {
+        return nil, fmt.Errorf("bip353: parsing record: %w", err)
+    }
+    inst.OriginalAddress = hra
+    inst.DNSSECValidated = true
+    inst.RawTXTRecord = rawRecord
+    inst.TTL = vr.MaxCacheTTL
+
+    return inst, nil
+}
+

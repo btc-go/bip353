@@ -1,6 +1,7 @@
 package silentpayment
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 
@@ -17,30 +18,35 @@ func init() {
 	}
 	for i, c := range bech32Charset {
 		charValues[byte(c)] = byte(i)
-		charValues[byte(c)-32] = byte(i)
+		if c >= 'a' && c <= 'z' {
+			charValues[byte(c)-32] = byte(i)
+		}
 	}
 }
 
-var networkByHRP = map[string]string{
-	"sp":   "mainnet",
-	"tsp":  "testnet",
-	"sprt": "signet",
+// hrpCandidates lists HRPs longest-first to avoid "sp" matching "sprt1...".
+var hrpCandidates = []struct{ hrp, network string }{
+	{"sprt", "signet"},
+	{"tsp", "testnet"},
+	{"sp", "mainnet"},
+}
+
+func hrpForAddress(lower string) (hrp, network string) {
+	for _, c := range hrpCandidates {
+		if strings.HasPrefix(lower, c.hrp+"1") {
+			return c.hrp, c.network
+		}
+	}
+	return "", ""
 }
 
 // Decode parses a BIP-352 silent payment address.
-// Returns the scan key, spend key, version byte, and network.
 func Decode(addr string) (*types.SilentPaymentDetails, error) {
 	if addr == "" {
 		return nil, fmt.Errorf("silentpayment: empty address")
 	}
 	lower := strings.ToLower(addr)
-	var hrp, network string
-	for h, n := range networkByHRP {
-		if strings.HasPrefix(lower, h+"1") {
-			hrp, network = h, n
-			break
-		}
-	}
+	hrp, network := hrpForAddress(lower)
 	if hrp == "" {
 		return nil, fmt.Errorf("silentpayment: unrecognized prefix (expected sp1/tsp1/sprt1)")
 	}
@@ -84,8 +90,8 @@ func Decode(addr string) (*types.SilentPaymentDetails, error) {
 		}
 		return &types.SilentPaymentDetails{
 			Network:     network,
-			ScanPubkey:  append([]byte(nil), scan...),
-			SpendPubkey: append([]byte(nil), spend...),
+			ScanPubkey:  bytes.Clone(scan),
+			SpendPubkey: bytes.Clone(spend),
 			Version:     version,
 		}, nil
 	}

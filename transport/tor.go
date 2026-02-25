@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"golang.org/x/net/proxy"
 )
@@ -15,14 +16,19 @@ const (
 	TorBrowserProxy = "127.0.0.1:9150"
 )
 
+// TorTransport routes DoH queries through a Tor SOCKS5 proxy. The DoH server
+// sees only the Tor exit node's IP. The DoH server is used only as a query
+// relay — it is not trusted for DNSSEC validation. Chain validation always
+// happens locally via dnssec-prover.
 type TorTransport struct {
 	ProxyAddr string
-	DoH       *DoHTransport
+	doh       *DoHTransport
 }
 
 // NewTorTransport routes DoH queries through a Tor SOCKS5 proxy.
-// proxyAddr defaults to TorDaemonProxy if empty.
-// dohProvider is a provider name ("cloudflare", "google", "quad9") or a full https:// URL.
+// proxyAddr defaults to TorDaemonProxy (127.0.0.1:9050) if empty.
+// dohProvider is a named provider ("cloudflare", "google", "quad9", "nextdns")
+// or a full https:// URL.
 func NewTorTransport(proxyAddr, dohProvider string) (*TorTransport, error) {
 	if proxyAddr == "" {
 		proxyAddr = TorDaemonProxy
@@ -30,6 +36,7 @@ func NewTorTransport(proxyAddr, dohProvider string) (*TorTransport, error) {
 	if _, _, err := net.SplitHostPort(proxyAddr); err != nil {
 		return nil, fmt.Errorf("tor: invalid proxy address %q: %w", proxyAddr, err)
 	}
+
 	var doh *DoHTransport
 	var err error
 	if strings.HasPrefix(dohProvider, "https://") {
@@ -40,10 +47,12 @@ func NewTorTransport(proxyAddr, dohProvider string) (*TorTransport, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tor: %w", err)
 	}
+
 	torDialer, err := proxy.SOCKS5("tcp", proxyAddr, nil, proxy.Direct)
 	if err != nil {
 		return nil, fmt.Errorf("tor: SOCKS5 dialer for %s: %w", proxyAddr, err)
 	}
+
 	var dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	if cd, ok := torDialer.(proxy.ContextDialer); ok {
 		dialContext = cd.DialContext
@@ -52,6 +61,7 @@ func NewTorTransport(proxyAddr, dohProvider string) (*TorTransport, error) {
 			return torDialer.Dial(network, addr)
 		}
 	}
+
 	doh.Client = &http.Client{
 		Timeout: DefaultTimeout,
 		Transport: &http.Transport{
@@ -60,32 +70,27 @@ func NewTorTransport(proxyAddr, dohProvider string) (*TorTransport, error) {
 			MaxIdleConns:          10,
 			IdleConnTimeout:       DefaultTimeout,
 			TLSHandshakeTimeout:   DefaultTimeout,
-			ExpectContinueTimeout: 1e9,
+			ExpectContinueTimeout: time.Second,
 		},
 	}
-	return &TorTransport{ProxyAddr: proxyAddr, DoH: doh}, nil
+
+	return &TorTransport{ProxyAddr: proxyAddr, doh: doh}, nil
 }
 
 func (t *TorTransport) LookupTXT(ctx context.Context, name string) (*QueryResult, error) {
-	result, err := t.DoH.LookupTXT(ctx, name)
+	result, err := resolveWithProver(ctx, name, "tor+doh", t.doh.sendQuery)
 	if err != nil {
 		return nil, fmt.Errorf("tor(%s): %w", t.ProxyAddr, err)
-	}
-	if result != nil {
-		result.Transport = "tor+" + result.Transport
 	}
 	return result, nil
 }
 
 // CheckTorProxy checks whether something is listening at proxyAddr.
-// It does not verify that Tor is running or that the circuit is live.
 func CheckTorProxy(proxyAddr string) error {
 	conn, err := net.DialTimeout("tcp", proxyAddr, DefaultTimeout)
 	if err != nil {
 		return fmt.Errorf("tor proxy at %s not reachable: %w", proxyAddr, err)
 	}
-	if err := conn.Close(); err != nil {
-		_ = err 
-	}
+	conn.Close()
 	return nil
 }

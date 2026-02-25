@@ -6,10 +6,11 @@ import (
 	"net/url"
 	"strings"
 	"unicode"
+
+	"golang.org/x/net/idna"
 )
 
 var (
-	ErrDNSSECRequired  = errors.New("DNSSEC validation required: AD bit not set")
 	ErrNXDOMAIN        = errors.New("DNS name not found (NXDOMAIN)")
 	ErrAmbiguousRecord = errors.New("multiple BIP-353 TXT records found")
 	ErrNoRecord        = errors.New("no BIP-353 TXT record found")
@@ -43,6 +44,27 @@ func (p PaymentType) String() string {
 	}
 }
 
+type BOLT12Type uint8
+
+const (
+	BOLT12TypeOffer          BOLT12Type = 0
+	BOLT12TypeInvoiceRequest BOLT12Type = 1
+	BOLT12TypeInvoice        BOLT12Type = 2
+)
+
+func (t BOLT12Type) String() string {
+	switch t {
+	case BOLT12TypeOffer:
+		return "offer"
+	case BOLT12TypeInvoiceRequest:
+		return "invoice_request"
+	case BOLT12TypeInvoice:
+		return "invoice"
+	default:
+		return "unknown"
+	}
+}
+
 type HumanReadableAddress struct {
 	User   string
 	Domain string
@@ -52,12 +74,86 @@ func (h HumanReadableAddress) String() string {
 	return fmt.Sprintf("₿%s@%s", h.User, h.Domain)
 }
 
+// DNSName returns the fully-qualified DNS name for this address per BIP-353.
+// Non-ASCII components are encoded as punycode using the UTS#46 lookup profile.
 func (h HumanReadableAddress) DNSName() string {
+	user := strings.ToLower(h.User)
 	domain := h.Domain
+
+	if !isASCII(user) {
+		if encoded, err := idna.Lookup.ToASCII(user); err == nil {
+			user = encoded
+		}
+	}
+
+	if !isASCII(domain) {
+		d := strings.TrimSuffix(domain, ".")
+		if encoded, err := idna.Lookup.ToASCII(d); err == nil {
+			domain = encoded
+		}
+	}
+
 	if !strings.HasSuffix(domain, ".") {
 		domain += "."
 	}
-	return fmt.Sprintf("%s.user._bitcoin-payment.%s", strings.ToLower(h.User), domain)
+	return fmt.Sprintf("%s.user._bitcoin-payment.%s", user, domain)
+}
+
+type PaymentInstruction struct {
+	OriginalAddress      HumanReadableAddress
+	RawTXTRecord         string
+	URI                  string
+	PaymentType          PaymentType
+	IsReusable           bool
+	DNSSECValidated      bool
+	TTL                  uint32
+	OnChainAddress       string
+	OnChainAddresses     []string
+	BOLT11Invoice        string
+	BOLT12Offer          string
+	BOLT12Details        *BOLT12OfferDetails
+	SilentPaymentAddress string
+	SilentPaymentDetails *SilentPaymentDetails
+	ExtraParams          map[string]string
+}
+
+type BOLT12OfferDetails struct {
+	Type           BOLT12Type
+	Description    string
+	NodeID         string
+	Currency       string
+	AmountMsat     uint64
+	Issuer         string
+	QuantityMax    uint64
+	AbsoluteExpiry uint64
+	Features       []byte
+	Paths          []BlindedPath
+	RawChains      []byte
+	RawMetadata    []byte
+	RawSignature   []byte
+}
+
+type BlindedPath struct {
+	IntroductionNodeID []byte
+	BlindingPoint      []byte
+	Hops               []BlindedHop
+}
+
+type BlindedHop struct {
+	BlindedNodeID          []byte
+	EncryptedRecipientData []byte
+}
+
+type SilentPaymentDetails struct {
+	Network     string
+	ScanPubkey  []byte
+	SpendPubkey []byte
+	Version     byte
+}
+
+type ParsedBIP21 struct {
+	Address string
+	Params  url.Values
 }
 
 func ParseHumanReadableAddress(addr string) (HumanReadableAddress, error) {
@@ -88,6 +184,11 @@ func validateUser(user string) error {
 	if len(user) > 63 {
 		return fmt.Errorf("user part exceeds 63 bytes (%d)", len(user))
 	}
+	if !isASCII(user) {
+		if err := rejectMixedScript(user); err != nil {
+			return err
+		}
+	}
 	for _, r := range user {
 		if unicode.IsSpace(r) || r == '@' || r == '\x00' {
 			return fmt.Errorf("user part contains invalid character: %q", r)
@@ -101,6 +202,18 @@ func validateDomain(domain string) error {
 		return fmt.Errorf("domain cannot be empty")
 	}
 	d := strings.TrimSuffix(domain, ".")
+	if !isASCII(d) {
+		for _, label := range strings.Split(d, ".") {
+			if !isASCII(label) {
+				if err := rejectMixedScript(label); err != nil {
+					return fmt.Errorf("domain label %q: %w", label, err)
+				}
+			}
+		}
+		if _, err := idna.Lookup.ToASCII(d); err != nil {
+			return fmt.Errorf("invalid international domain name: %w", err)
+		}
+	}
 	if len(d) > 253 {
 		return fmt.Errorf("domain exceeds 253 bytes")
 	}
@@ -112,101 +225,50 @@ func validateDomain(domain string) error {
 		if label == "" || len(label) > 63 {
 			return fmt.Errorf("domain label %q is invalid", label)
 		}
-		if !isAlphaNum(rune(label[0])) || !isAlphaNum(rune(label[len(label)-1])) {
-			return fmt.Errorf("domain label %q must start and end with an alphanumeric character", label)
+		if isASCII(label) {
+			if !isAlphaNum(rune(label[0])) || !isAlphaNum(rune(label[len(label)-1])) {
+				return fmt.Errorf("domain label %q must start and end with an alphanumeric character", label)
+			}
 		}
 	}
 	return nil
+}
+
+// rejectMixedScript returns an error if s mixes characters from more than one
+// Unicode script. A purely Cyrillic or purely Latin string is fine; mixing the
+// two is a classic homograph attack vector (e.g. Cyrillic 'а' vs Latin 'a').
+// Common and Inherited are neutral scripts (digits, punctuation) and are ignored.
+func rejectMixedScript(s string) error {
+	scripts := make(map[string]bool)
+	for _, r := range s {
+		for name, table := range unicode.Scripts {
+			if unicode.Is(table, r) {
+				scripts[name] = true
+				break
+			}
+		}
+	}
+	delete(scripts, "Common")
+	delete(scripts, "Inherited")
+	if len(scripts) > 1 {
+		return fmt.Errorf("mixes multiple Unicode scripts (possible homograph attack)")
+	}
+	return nil
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] > 127 {
+			return false
+		}
+	}
+	return true
 }
 
 func isAlphaNum(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 }
 
-type PaymentInstruction struct {
-	OriginalAddress      HumanReadableAddress
-	RawTXTRecord         string
-	URI                  string
-	PaymentType          PaymentType
-	IsReusable           bool
-	DNSSECValidated      bool
-	TTL                  uint32
-	OnChainAddress       string
-	// OnChainAddresses holds all bc= values (segwit v0, v1, etc.)
-	// per BIP-321 multiple bc= params are valid
-	OnChainAddresses     []string
-	BOLT11Invoice        string
-	BOLT12Offer          string
-	BOLT12Details        *BOLT12OfferDetails
-	SilentPaymentAddress string
-	SilentPaymentDetails *SilentPaymentDetails
-	ExtraParams          map[string]string
-	
-
-}
-
-type BOLT12OfferDetails struct {
-	Type           BOLT12Type
-	Description    string
-	NodeID         string
-	Currency       string
-	AmountMsat     uint64
-	Issuer         string
-	QuantityMax    uint64
-	AbsoluteExpiry uint64
-	Features       []byte
-	Paths          []BlindedPath
-	RawChains      []byte
-	RawMetadata    []byte
-	RawSignature   []byte
-}
-
-type BOLT12Type uint8
-
-const (
-	BOLT12TypeOffer          BOLT12Type = 0
-	BOLT12TypeInvoiceRequest BOLT12Type = 1
-	BOLT12TypeInvoice        BOLT12Type = 2
-)
-
-func (t BOLT12Type) String() string {
-	switch t {
-	case BOLT12TypeOffer:
-		return "offer"
-	case BOLT12TypeInvoiceRequest:
-		return "invoice_request"
-	case BOLT12TypeInvoice:
-		return "invoice"
-	default:
-		return "unknown"
-	}
-}
-
-type BlindedPath struct {
-	IntroductionNodeID []byte
-	BlindingPoint      []byte
-	Hops               []BlindedHop
-}
-
-type BlindedHop struct {
-	BlindedNodeID          []byte
-	EncryptedRecipientData []byte
-}
-
-type SilentPaymentDetails struct {
-	Network     string
-	ScanPubkey  []byte
-	SpendPubkey []byte
-	Version     byte
-}
-
-type ParsedBIP21 struct {
-	Address string
-	Params  url.Values
-}
-
-// normalizeParams returns a copy of params with all keys lowercased,
-// as required by BIP-321 (query parameter keys are case-insensitive).
 func normalizeParams(params url.Values) url.Values {
 	normalized := make(url.Values, len(params))
 	for k, v := range params {
@@ -244,8 +306,8 @@ func ParseBIP21URI(uri string) (*ParsedBIP21, error) {
 	return result, nil
 }
 
-// DetectPaymentType returns the highest-priority payment type from a BIP-21 URI.
-// Priority: BOLT-12 > Silent Payment > BOLT-11 > on-chain.
+// DetectPaymentType returns the highest-priority payment type present in a
+// BIP-21 URI. Priority: BOLT-12 > Silent Payment > BOLT-11 > on-chain.
 func DetectPaymentType(parsed *ParsedBIP21) (PaymentType, bool, error) {
 	if parsed.Params.Get("lno") != "" {
 		return PaymentTypeLightningBOLT12, true, nil

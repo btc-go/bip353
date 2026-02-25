@@ -51,12 +51,11 @@ func run(args []string) error {
 
 func cmdResolve(args []string) error {
 	fs := flag.NewFlagSet("resolve", flag.ContinueOnError)
-	transportSpec := fs.String("transport", "classic", "classic | doh:<provider> | tor:<provider>")
+	transportSpec := fs.String("transport", "direct", "direct | doh:<provider> | tor:<provider>")
 	torProxy := fs.String("tor-proxy", transport.TorDaemonProxy, "Tor SOCKS5 proxy address")
-	nameservers := fs.String("nameservers", "", "Comma-separated resolvers for classic transport (host:port)")
-	insecure := fs.Bool("insecure", false, "Disable DNSSEC (NOT safe for production)")
+	nameservers := fs.String("nameservers", "", "Comma-separated resolvers for direct transport (host:port)")
 	timeout := fs.Duration("timeout", 10*time.Second, "Query timeout")
-	verbose := fs.Bool("verbose", false, "Show full decoded fields")
+	verbose := fs.Bool("verbose", false, "Show full decoded fields including DNS TTL")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -64,18 +63,9 @@ func cmdResolve(args []string) error {
 		return fmt.Errorf("resolve: address required — usage: bip353 resolve [flags] <₿user@domain>")
 	}
 
-	t, err := buildTransport(*transportSpec, *torProxy, *nameservers)
+	r, err := buildResolver(*transportSpec, *torProxy, *nameservers)
 	if err != nil {
 		return fmt.Errorf("resolve: %w", err)
-	}
-
-	opts := bip353.DefaultOptions()
-	opts.Transport = t
-	opts.AllowInsecure = *insecure
-
-	r, err := bip353.New(opts)
-	if err != nil {
-		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -92,6 +82,32 @@ func cmdResolve(args []string) error {
 		printInstruction(inst)
 	}
 	return nil
+}
+
+func buildResolver(spec, torProxy, nameservers string) (*bip353.Resolver, error) {
+	switch {
+	case spec == "direct":
+		if nameservers != "" {
+			t := transport.NewFullValidationTransportWithNameservers(strings.Split(nameservers, ","))
+			opts := bip353.DefaultOptions()
+			opts.Transport = t
+			return bip353.NewWithOptions(opts)
+		}
+		return bip353.New()
+
+	case strings.HasPrefix(spec, "doh:"):
+		provider := strings.TrimPrefix(spec, "doh:")
+		if strings.HasPrefix(provider, "https://") {
+			return bip353.NewWithDoHURL(provider)
+		}
+		return bip353.NewWithDoH(provider)
+
+	case strings.HasPrefix(spec, "tor:"):
+		return bip353.NewWithTor(torProxy, strings.TrimPrefix(spec, "tor:"))
+
+	default:
+		return nil, fmt.Errorf("unknown transport %q; use direct, doh:<provider>, or tor:<provider>", spec)
+	}
 }
 
 func printInstruction(inst *bip353.PaymentInstruction) {
@@ -181,7 +197,7 @@ func decodeBOLT12(offer string) error {
 	if err != nil && details == nil {
 		return fmt.Errorf("decode: %w", err)
 	}
-	fmt.Printf("Type:    %s\n", details.Type)
+	fmt.Printf("Type:          %s\n", details.Type)
 	if details.Description != "" {
 		fmt.Printf("Description:   %s\n", details.Description)
 	}
@@ -233,26 +249,6 @@ func decodeSilentPayment(addr string) error {
 	return nil
 }
 
-func buildTransport(spec, torProxy, nameservers string) (bip353.Transport, error) {
-	switch {
-	case spec == "classic":
-		if nameservers != "" {
-			return bip353.NewClassicTransportWithNameservers(strings.Split(nameservers, ",")), nil
-		}
-		return bip353.NewClassicTransport(), nil
-	case strings.HasPrefix(spec, "doh:"):
-		provider := strings.TrimPrefix(spec, "doh:")
-		if strings.HasPrefix(provider, "https://") {
-			return bip353.NewDoHTransportWithURL(provider)
-		}
-		return bip353.NewDoHTransport(provider)
-	case strings.HasPrefix(spec, "tor:"):
-		return bip353.NewTorTransport(torProxy, strings.TrimPrefix(spec, "tor:"))
-	default:
-		return nil, fmt.Errorf("unknown transport %q; use classic, doh:<provider>, or tor:<provider>", spec)
-	}
-}
-
 func printUsage() {
 	fmt.Print(`bip353 — BIP-353 DNS Payment Instructions
 
@@ -267,14 +263,13 @@ COMMANDS:
   help                 Show this help
 
 RESOLVE FLAGS:
-  --transport <spec>       classic | doh:<provider> | tor:<provider>
+  --transport <spec>       direct | doh:<provider> | tor:<provider>
                            Providers: cloudflare | google | quad9 | nextdns
                            Custom DoH: doh:https://your.doh.server/dns-query
   --tor-proxy <host:port>  Tor SOCKS5 proxy (default: 127.0.0.1:9050)
-  --nameservers <list>     Comma-separated resolvers for classic transport
-  --insecure               Disable DNSSEC (NOT safe for production)
+  --nameservers <list>     Comma-separated resolvers for direct transport
   --timeout <duration>     Query timeout (default: 10s)
-  --verbose                Show full decoded BOLT-12/Silent Payment fields
+  --verbose                Show full decoded fields including DNS TTL
 
 BUILD FLAGS:
   --address <addr>     On-chain Bitcoin address
@@ -287,6 +282,7 @@ EXAMPLES:
   bip353 resolve ₿alice@example.com
   bip353 resolve --transport doh:cloudflare ₿alice@example.com
   bip353 resolve --transport tor:cloudflare ₿alice@example.com
+  bip353 resolve --nameservers 8.8.8.8:53,1.1.1.1:53 ₿alice@example.com
   bip353 dnsname ₿alice@example.com
   bip353 build --address bc1q... --bolt12 lno1...
   bip353 decode lno1qcpjkuepqyz5z...

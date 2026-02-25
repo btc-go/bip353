@@ -17,8 +17,8 @@ func TestDefaultNameservers(t *testing.T) {
 	}
 }
 
-func TestClassicTransportDefaults(t *testing.T) {
-	tr := transport.NewClassicTransport()
+func TestFullValidationTransportDefaults(t *testing.T) {
+	tr := transport.NewFullValidationTransport()
 	if len(tr.Nameservers) == 0 {
 		t.Error("nameservers must not be empty")
 	}
@@ -27,9 +27,9 @@ func TestClassicTransportDefaults(t *testing.T) {
 	}
 }
 
-func TestClassicTransportCustomNameservers(t *testing.T) {
+func TestFullValidationTransportCustomNameservers(t *testing.T) {
 	ns := []string{"192.0.2.1:53", "192.0.2.2:53"}
-	tr := transport.NewClassicTransportWithNameservers(ns)
+	tr := transport.NewFullValidationTransportWithNameservers(ns)
 	if len(tr.Nameservers) != 2 {
 		t.Errorf("expected 2 nameservers, got %d", len(tr.Nameservers))
 	}

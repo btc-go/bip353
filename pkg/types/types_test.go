@@ -7,7 +7,6 @@ import (
 	"github.com/btc-go/bip353/pkg/types"
 )
 
-
 func TestParseHumanReadableAddress(t *testing.T) {
 	tests := []struct {
 		input      string
@@ -22,22 +21,22 @@ func TestParseHumanReadableAddress(t *testing.T) {
 		{"₿user123@example.com", "user123", "example.com", false},
 		{"<20bf>alice@example.com", "alice", "example.com", false},
 		{"\u20bfalice@example.com", "alice", "example.com", false},
-
-		// Punycode domain (IDN)
 		{"₿alice@xn--nxasmq6b.com", "alice", "xn--nxasmq6b.com", false},
-
 		{"₿ALICE@example.com", "ALICE", "example.com", false},
-
 		{"₿simple@dnssec_proof_tests.bitcoin.ninja", "simple", "dnssec_proof_tests.bitcoin.ninja", false},
 
 		// Error cases
-		{"₿aliceexample.com", "", "", true},   // missing @
-		{"₿a@b@example.com", "", "", true},    // two @ signs
-		{"₿@example.com", "", "", true},       // empty user
-		{"₿alice@", "", "", true},             // empty domain
-		{"₿alice@localhost", "", "", true},    // single-label domain
-		{"", "", "", true},                    // empty string
-		{"₿ali ce@example.com", "", "", true}, // space in user
+		{"₿aliceexample.com", "", "", true},
+		{"₿a@b@example.com", "", "", true},
+		{"₿@example.com", "", "", true},
+		{"₿alice@", "", "", true},
+		{"₿alice@localhost", "", "", true},
+		{"", "", "", true},
+		{"₿ali ce@example.com", "", "", true},
+		// Homograph attack — Cyrillic 'а' (U+0430) looks identical to Latin 'a'.
+		{"₿аlice@example.com", "", "", true},
+		// Mixed-script domain homograph.
+		{"₿alice@еxample.com", "", "", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
@@ -88,7 +87,6 @@ func TestHRAString(t *testing.T) {
 	}
 }
 
-
 func TestParseBIP21URI(t *testing.T) {
 	tests := []struct {
 		input      string
@@ -132,10 +130,7 @@ func TestParseBIP21URI(t *testing.T) {
 	}
 }
 
-// TestParseBIP21URI_CaseInsensitiveKeys: BIP-321 requires query parameter
-// keys to be treated case-insensitively. QR codes commonly use uppercase.
 func TestParseBIP21URI_CaseInsensitiveKeys(t *testing.T) {
-	// From BIP-321 examples section — QR code format
 	uri := "BITCOIN:?BC=BC1QUFGY354J3KMVUCH987XE4S40836X3H0LG8F5N2"
 	parsed, err := types.ParseBIP21URI(uri)
 	if err != nil {
@@ -146,8 +141,6 @@ func TestParseBIP21URI_CaseInsensitiveKeys(t *testing.T) {
 	}
 }
 
-// TestParseBIP21URI_RequiredParam: req- prefixed params that are unknown
-// must cause the entire URI to be rejected per BIP-321.
 func TestParseBIP21URI_RequiredParam(t *testing.T) {
 	cases := []struct {
 		uri     string
@@ -172,7 +165,6 @@ func TestParseBIP21URI_RequiredParam(t *testing.T) {
 	}
 }
 
-
 func TestDetectPaymentType(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -186,7 +178,6 @@ func TestDetectPaymentType(t *testing.T) {
 		{"bolt11 with fallback", "bitcoin:bc1q?lightning=lnbc1x", types.PaymentTypeLightningBOLT11, false, false},
 		{"onchain address field", "bitcoin:bc1qaddr", types.PaymentTypeOnChain, false, false},
 		{"onchain bc= param", "bitcoin:?bc=bc1qnative", types.PaymentTypeOnChain, false, false},
-		// BOLT-12 wins when all methods present
 		{"all methods bolt12 wins", "bitcoin:?lno=x&sp=y&lightning=z", types.PaymentTypeLightningBOLT12, true, false},
 		{"empty", "bitcoin:", types.PaymentTypeUnknown, false, true},
 	}

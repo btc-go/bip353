@@ -2,6 +2,7 @@ package builder
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -48,23 +49,23 @@ func (b *URIBuilder) WithParam(key, value string) *URIBuilder {
 // BIP-21 does not percent-encode parameter values; they are transmitted as-is
 // after the '?' separator. This preserves BOLT-12 offer strings verbatim.
 func (b *URIBuilder) Build() (string, error) {
-	if b.address == "" && len(b.params) == 0 {
-		return "", fmt.Errorf("bip21: URI must have an address or at least one parameter")
-	}
-	var sb strings.Builder
-	sb.WriteString("bitcoin:")
-	sb.WriteString(b.address)
-	for i, p := range b.params {
-		if i == 0 {
-			sb.WriteByte('?')
-		} else {
-			sb.WriteByte('&')
-		}
-		sb.WriteString(p.key)
-		sb.WriteByte('=')
-		sb.WriteString(p.value)
-	}
-	return sb.String(), nil
+    if b.address == "" && len(b.params) == 0 {
+        return "", fmt.Errorf("bip21: URI must have an address or at least one parameter")
+    }
+    var sb strings.Builder
+    sb.WriteString("bitcoin:")
+    sb.WriteString(b.address)
+    for i, p := range b.params {
+        if i == 0 {
+            sb.WriteByte('?')
+        } else {
+            sb.WriteByte('&')
+        }
+        sb.WriteString(p.key)
+        sb.WriteByte('=')
+        sb.WriteString(url.QueryEscape(p.value))
+    }
+    return sb.String(), nil
 }
 
 func (b *URIBuilder) MustBuild() string {

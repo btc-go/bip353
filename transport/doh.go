@@ -3,16 +3,14 @@ package transport
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
-
-	"github.com/miekg/dns"
 )
 
+// WellKnownDoHProviders maps short provider names to their RFC 8484 endpoints.
 var WellKnownDoHProviders = map[string]string{
 	"cloudflare": "https://cloudflare-dns.com/dns-query",
 	"google":     "https://dns.google/dns-query",
@@ -20,27 +18,22 @@ var WellKnownDoHProviders = map[string]string{
 	"nextdns":    "https://dns.nextdns.io/dns-query",
 }
 
-type DoHFormat uint8
-
-const (
-	DoHFormatWire DoHFormat = iota
-	DoHFormatJSON
-)
-
+// DoHTransport sends DNS queries over HTTPS (RFC 8484). Hides query names
+// from your ISP. The DoH server is used only as a query relay — it is not
+// trusted for DNSSEC validation. Chain validation always happens locally
+// via dnssec-prover.
 type DoHTransport struct {
 	Endpoints []string
-	Format    DoHFormat
 	Client    *http.Client
 }
 
 func NewDoHTransport(provider string) (*DoHTransport, error) {
 	endpoint, ok := WellKnownDoHProviders[strings.ToLower(provider)]
 	if !ok {
-		return nil, fmt.Errorf("doh: unknown provider %q", provider)
+		return nil, fmt.Errorf("doh: unknown provider %q (known: cloudflare, google, quad9, nextdns)", provider)
 	}
 	return &DoHTransport{
 		Endpoints: []string{endpoint},
-		Format:    DoHFormatWire,
 		Client:    &http.Client{Timeout: DefaultTimeout},
 	}, nil
 }
@@ -51,127 +44,54 @@ func NewDoHTransportWithURL(endpoint string) (*DoHTransport, error) {
 	}
 	return &DoHTransport{
 		Endpoints: []string{endpoint},
-		Format:    DoHFormatWire,
 		Client:    &http.Client{Timeout: DefaultTimeout},
 	}, nil
 }
 
 func (t *DoHTransport) LookupTXT(ctx context.Context, name string) (*QueryResult, error) {
+	return resolveWithProver(ctx, name, "doh", t.sendQuery)
+}
+
+func (t *DoHTransport) sendQuery(ctx context.Context, query []byte) ([]byte, error) {
 	client := t.Client
 	if client == nil {
 		client = &http.Client{Timeout: DefaultTimeout}
 	}
 	var lastErr error
 	for _, endpoint := range t.Endpoints {
-		var result *QueryResult
-		var err error
-		if t.Format == DoHFormatJSON {
-			result, err = t.queryJSON(ctx, client, endpoint, name)
-		} else {
-			result, err = t.queryWire(ctx, client, endpoint, name)
-		}
+		resp, err := sendDoHQuery(ctx, client, endpoint, query)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		return result, nil
+		return resp, nil
 	}
 	return nil, fmt.Errorf("doh: all endpoints failed: %w", lastErr)
 }
 
-func (t *DoHTransport) queryWire(ctx context.Context, client *http.Client, endpoint, name string) (*QueryResult, error) {
-	msg := newDNSSECQuery(name, dns.TypeTXT)
-	wire, err := msg.Pack()
+// sendDoHQuery sends a raw DNS wire-format query via HTTP POST (RFC 8484)
+// and returns the raw DNS wire-format response for dnssec-prover to process.
+func sendDoHQuery(ctx context.Context, client *http.Client, endpoint string, query []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(query))
 	if err != nil {
-		return nil, fmt.Errorf("doh: packing query: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(wire))
-	if err != nil {
-		return nil, fmt.Errorf("doh: building request: %w", err)
+		return nil, fmt.Errorf("building request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/dns-message")
 	req.Header.Set("Accept", "application/dns-message")
+
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("doh: request to %s: %w", endpoint, err)
+		return nil, fmt.Errorf("request to %s: %w", endpoint, err)
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("doh: HTTP %d from %s", resp.StatusCode, endpoint)
+		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, endpoint)
 	}
+
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
-		return nil, fmt.Errorf("doh: reading response: %w", err)
+		return nil, fmt.Errorf("reading response: %w", err)
 	}
-	var dnsResp dns.Msg
-	if err := dnsResp.Unpack(body); err != nil {
-		return nil, fmt.Errorf("doh: unpacking response: %w", err)
-	}
-	return parseResponse(&dnsResp, "doh-wire")
-}
-
-func (t *DoHTransport) queryJSON(ctx context.Context, client *http.Client, endpoint, name string) (*QueryResult, error) {
-	reqURL := fmt.Sprintf("%s?name=%s&type=TXT&do=1&cd=0",
-		endpoint, url.QueryEscape(strings.TrimSuffix(name, ".")))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("doh-json: building request: %w", err)
-	}
-	req.Header.Set("Accept", "application/dns-json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("doh-json: request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("doh-json: HTTP %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if err != nil {
-		return nil, fmt.Errorf("doh-json: reading response: %w", err)
-	}
-	return parseJSONResponse(body)
-}
-
-type dohJSONResponse struct {
-	Status int             `json:"Status"`
-	AD     bool            `json:"AD"`
-	Answer []dohJSONRecord `json:"Answer"`
-}
-
-type dohJSONRecord struct {
-	Type uint16 `json:"type"`
-	Data string `json:"data"`
-}
-
-func parseJSONResponse(body []byte) (*QueryResult, error) {
-	var resp dohJSONResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("doh-json: parsing response: %w", err)
-	}
-	if resp.Status == dns.RcodeNameError {
-		return nil, fmt.Errorf("NXDOMAIN")
-	}
-	if resp.Status != dns.RcodeSuccess {
-		return nil, fmt.Errorf("DNS error: rcode %d", resp.Status)
-	}
-	result := &QueryResult{Authenticated: resp.AD, Transport: "doh-json"}
-	for _, rec := range resp.Answer {
-		if rec.Type != dns.TypeTXT {
-			continue
-		}
-		data := rec.Data
-		if strings.Contains(data, `" "`) {
-			parts := strings.Split(data, `" "`)
-			cleaned := make([]string, len(parts))
-			for i, p := range parts {
-				cleaned[i] = strings.Trim(p, `"`)
-			}
-			data = strings.Join(cleaned, "")
-		} else {
-			data = strings.Trim(data, `"`)
-		}
-		result.Records = append(result.Records, data)
-	}
-	return result, nil
+	return body, nil
 }

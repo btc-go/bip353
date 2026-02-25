@@ -1,6 +1,7 @@
 package bolt12
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 
 const bech32Charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 
+const maxBlindedHops = 500
+
 var bech32Values [256]byte
 
 func init() {
@@ -20,7 +23,9 @@ func init() {
 	}
 	for i, c := range bech32Charset {
 		bech32Values[byte(c)] = byte(i)
-		bech32Values[byte(c)-32] = byte(i)
+		if c >= 'a' && c <= 'z' {
+			bech32Values[byte(c)-32] = byte(i)
+		}
 	}
 }
 
@@ -39,27 +44,16 @@ const (
 	tlvOfferSignature      uint64 = 240
 )
 
-// DecodeOffer decodes a BOLT-12 offer (lno1), invoice_request (lnr1), or invoice (lni1).
-// It does not verify cryptographic signatures.
-// On unknown future even TLV types, returns partial results and a non-nil error.
 func DecodeOffer(raw string) (*types.BOLT12OfferDetails, error) {
 	if raw == "" {
 		return nil, fmt.Errorf("bolt12: empty string")
 	}
 	lower := strings.ToLower(raw)
-	var msgType types.BOLT12Type
-	var hrp string
-	switch {
-	case strings.HasPrefix(lower, "lno1"):
-		msgType, hrp = types.BOLT12TypeOffer, "lno"
-	case strings.HasPrefix(lower, "lnr1"):
-		msgType, hrp = types.BOLT12TypeInvoiceRequest, "lnr"
-	case strings.HasPrefix(lower, "lni1"):
-		msgType, hrp = types.BOLT12TypeInvoice, "lni"
-	default:
-		return nil, fmt.Errorf("bolt12: unrecognized prefix (expected lno1/lnr1/lni1)")
+	msgType, hrp, err := classifyPrefix(lower)
+	if err != nil {
+		return nil, err
 	}
-	data, err := bech32mDecode(lower, hrp)
+	data, err := bech32Decode(lower, hrp)
 	if err != nil {
 		return nil, fmt.Errorf("bolt12: %w", err)
 	}
@@ -70,137 +64,96 @@ func DecodeOffer(raw string) (*types.BOLT12OfferDetails, error) {
 	return details, nil
 }
 
-// Validate returns nil if raw is a syntactically valid BOLT-12 bech32m string.
 func Validate(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("bolt12: empty string")
 	}
-	lower := strings.ToLower(raw)
-	var hrp string
-	switch {
-	case strings.HasPrefix(lower, "lno1"):
-		hrp = "lno"
-	case strings.HasPrefix(lower, "lnr1"):
-		hrp = "lnr"
-	case strings.HasPrefix(lower, "lni1"):
-		hrp = "lni"
-	default:
-		return fmt.Errorf("bolt12: unrecognized prefix (expected lno1/lnr1/lni1)")
+	_, hrp, err := classifyPrefix(strings.ToLower(raw))
+	if err != nil {
+		return err
 	}
-	_, err := bech32mDecode(lower, hrp)
+	_, err = bech32Decode(strings.ToLower(raw), hrp)
 	return err
 }
 
-func bech32mDecode(s, expectedHRP string) ([]byte, error) {
-	sep := strings.LastIndexByte(s, '1')
-	if sep < 1 {
-		return nil, fmt.Errorf("no bech32 separator '1'")
+func classifyPrefix(lower string) (types.BOLT12Type, string, error) {
+	switch {
+	case strings.HasPrefix(lower, "lno1"):
+		return types.BOLT12TypeOffer, "lno", nil
+	case strings.HasPrefix(lower, "lnr1"):
+		return types.BOLT12TypeInvoiceRequest, "lnr", nil
+	case strings.HasPrefix(lower, "lni1"):
+		return types.BOLT12TypeInvoice, "lni", nil
 	}
-	hrp := s[:sep]
-	if hrp != expectedHRP {
-		return nil, fmt.Errorf("unexpected HRP: got %q, want %q", hrp, expectedHRP)
+	return types.BOLT12TypeOffer, "", fmt.Errorf("bolt12: unrecognized prefix (expected lno1/lnr1/lni1)")
+}
+
+// bech32Decode decodes a BOLT-12 offer string. BOLT-12 uses bech32 purely as a
+// human-readable container.
+func bech32Decode(s, hrp string) ([]byte, error) {
+	dataPart := s[len(hrp)+1:]
+	if len(dataPart) == 0 {
+		return nil, fmt.Errorf("bolt12: data part empty")
 	}
-	dataPart := s[sep+1:]
-	if len(dataPart) < 6 {
-		return nil, fmt.Errorf("data part too short (%d chars)", len(dataPart))
-	}
-	decoded := make([]byte, len(dataPart))
-	for i := 0; i < len(dataPart); i++ {
-		v := bech32Values[dataPart[i]]
+	b32 := make([]byte, len(dataPart))
+	for i, c := range dataPart {
+		v := bech32Values[c]
 		if v == 255 {
-			return nil, fmt.Errorf("invalid bech32 character %q at position %d", dataPart[i], i)
+			return nil, fmt.Errorf("bolt12: invalid character %q at position %d", c, i)
 		}
-		decoded[i] = v
+		b32[i] = v
 	}
-	const bech32mConst = 0x2bc830a3
-	if polymod(hrpExpand(hrp), decoded) != bech32mConst {
-		return nil, fmt.Errorf("invalid bech32m checksum")
-	}
-	out, err := convertBits(decoded[:len(decoded)-6], 5, 8, false)
-	if err != nil {
-		return nil, fmt.Errorf("bit conversion: %w", err)
-	}
-	return out, nil
+	return convertBits(b32, 5, 8)
 }
 
-func hrpExpand(hrp string) []byte {
-	res := make([]byte, len(hrp)*2+1)
-	for i := 0; i < len(hrp); i++ {
-		res[i] = hrp[i] >> 5
-		res[i+len(hrp)+1] = hrp[i] & 31
-	}
-	res[len(hrp)] = 0
-	return res
-}
 
-func polymod(values ...[]byte) uint32 {
-	gen := [5]uint32{0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3}
-	chk := uint32(1)
-	for _, v := range values {
-		for _, p := range v {
-			top := chk >> 25
-			chk = (chk&0x1ffffff)<<5 ^ uint32(p)
-			for i := 0; i < 5; i++ {
-				if top>>uint(i)&1 != 0 {
-					chk ^= gen[i]
-				}
-			}
-		}
-	}
-	return chk
-}
-
-func convertBits(data []byte, fromBits, toBits uint, pad bool) ([]byte, error) {
+func convertBits(data []byte, from, to uint) ([]byte, error) {
 	var acc, bits int
-	var out []byte
-	maxv := int((1 << toBits) - 1)
+	out := make([]byte, 0, len(data)*int(from)/int(to)+1)
+	mask := int((1 << to) - 1)
 	for _, b := range data {
-		acc = (acc << fromBits) | int(b)
-		bits += int(fromBits)
-		for bits >= int(toBits) {
-			bits -= int(toBits)
-			out = append(out, byte((acc>>bits)&maxv))
+		acc = acc<<from | int(b)
+		bits += int(from)
+		for bits >= int(to) {
+			bits -= int(to)
+			out = append(out, byte(acc>>bits&mask))
 		}
 	}
-	if pad {
-		if bits > 0 {
-			out = append(out, byte((acc<<(int(toBits)-bits))&maxv))
-		}
-	} else if bits >= int(fromBits) || (acc<<(int(toBits)-bits))&maxv != 0 {
-		return nil, fmt.Errorf("non-zero padding in bit conversion")
+	if acc<<(int(to)-bits)&mask != 0 {
+		return nil, fmt.Errorf("bolt12: non-zero padding bits in encoded offer")
 	}
 	return out, nil
 }
 
 func parseTLVStream(data []byte, d *types.BOLT12OfferDetails) error {
-	pos := 0
-	seenAny := false
 	var lastType uint64
-	for pos < len(data) {
+	first := true
+	for pos := 0; pos < len(data); {
 		tlvType, n, err := readBigSize(data[pos:])
 		if err != nil {
-			return fmt.Errorf("reading type at offset %d: %w", pos, err)
+			return fmt.Errorf("type at offset %d: %w", pos, err)
 		}
 		pos += n
-		if seenAny && tlvType <= lastType {
-			return fmt.Errorf("TLV types not strictly increasing: %d after %d", tlvType, lastType)
+
+		if !first && tlvType <= lastType {
+			return fmt.Errorf("TLV stream not canonical: type %d follows %d", tlvType, lastType)
 		}
-		seenAny = true
-		lastType = tlvType
-		tlvLen, n, err := readBigSize(data[pos:])
+		first, lastType = false, tlvType
+
+		length, n, err := readBigSize(data[pos:])
 		if err != nil {
-			return fmt.Errorf("reading length for type %d: %w", tlvType, err)
+			return fmt.Errorf("length for type %d: %w", tlvType, err)
 		}
 		pos += n
-		if uint64(len(data)-pos) < tlvLen {
-			return fmt.Errorf("type %d: value exceeds remaining data", tlvType)
+
+		if uint64(len(data)-pos) < length {
+			return fmt.Errorf("type %d claims %d bytes but only %d remain", tlvType, length, len(data)-pos)
 		}
-		value := data[pos : pos+int(tlvLen)]
-		pos += int(tlvLen)
-		if err := decodeTLVField(tlvType, value, d); err != nil {
-			if tlvType%2 == 0 {
-				return fmt.Errorf("unknown even TLV type %d: %w", tlvType, err)
-			}
+		val := data[pos : pos+int(length)]
+		pos += int(length)
+
+		if err := decodeTLVField(tlvType, val, d); err != nil && tlvType%2 == 0 {
+			return fmt.Errorf("type %d: %w", tlvType, err)
 		}
 	}
 	return nil
@@ -209,75 +162,135 @@ func parseTLVStream(data []byte, d *types.BOLT12OfferDetails) error {
 func decodeTLVField(t uint64, v []byte, d *types.BOLT12OfferDetails) error {
 	switch t {
 	case tlvOfferDescription:
-		if !utf8.Valid(v) {
-			return fmt.Errorf("offer_description is not valid UTF-8")
-		}
-		d.Description = string(v)
+		return decodeUTF8(v, &d.Description)
 	case tlvOfferIssuer:
-		if !utf8.Valid(v) {
-			return fmt.Errorf("offer_issuer is not valid UTF-8")
-		}
-		d.Issuer = string(v)
+		return decodeUTF8(v, &d.Issuer)
 	case tlvOfferNodeID:
-		if len(v) != 33 {
-			return fmt.Errorf("offer_node_id must be 33 bytes, got %d", len(v))
-		}
-		if v[0] != 0x02 && v[0] != 0x03 {
-			return fmt.Errorf("offer_node_id invalid prefix 0x%02x", v[0])
-		}
-		d.NodeID = hex.EncodeToString(v)
+		return decodeNodeID(v, &d.NodeID)
 	case tlvOfferAmount:
-		amt, err := readTU64(v)
-		if err != nil {
-			return fmt.Errorf("offer_amount: %w", err)
-		}
-		d.AmountMsat = amt
+		return decodeTU64(v, &d.AmountMsat)
+	case tlvOfferQuantityMax:
+		return decodeTU64(v, &d.QuantityMax)
+	case tlvOfferAbsoluteExpiry:
+		return decodeTU64(v, &d.AbsoluteExpiry)
 	case tlvOfferCurrency:
 		if len(v) != 3 {
-			return fmt.Errorf("offer_currency must be 3 bytes, got %d", len(v))
+			return fmt.Errorf("expected 3 bytes, got %d", len(v))
 		}
 		d.Currency = string(v)
 	case tlvOfferFeatures:
-		d.Features = clone(v)
-	case tlvOfferQuantityMax:
-		q, err := readTU64(v)
-		if err != nil {
-			return fmt.Errorf("offer_quantity_max: %w", err)
-		}
-		d.QuantityMax = q
-	case tlvOfferAbsoluteExpiry:
-		exp, err := readTU64(v)
-		if err != nil {
-			return fmt.Errorf("offer_absolute_expiry: %w", err)
-		}
-		d.AbsoluteExpiry = exp
+		d.Features = bytes.Clone(v)
 	case tlvOfferPaths:
 		paths, err := decodeBlindedPaths(v)
 		if err != nil {
-			return fmt.Errorf("offer_paths: %w", err)
+			return err
 		}
 		d.Paths = paths
 	case tlvOfferChains:
 		if len(v) == 0 || len(v)%32 != 0 {
-			return fmt.Errorf("offer_chains must be a non-zero multiple of 32 bytes, got %d", len(v))
+			return fmt.Errorf("must be non-zero multiple of 32 bytes, got %d", len(v))
 		}
-		d.RawChains = clone(v)
+		d.RawChains = bytes.Clone(v)
 	case tlvOfferMetadata:
-		d.RawMetadata = clone(v)
+		d.RawMetadata = bytes.Clone(v)
 	case tlvOfferSignature:
 		if len(v) != 64 {
-			return fmt.Errorf("offer_signature must be 64 bytes, got %d", len(v))
+			return fmt.Errorf("expected 64 bytes, got %d", len(v))
 		}
-		d.RawSignature = clone(v)
-	default:
-		return fmt.Errorf("type %d not handled", t)
+		d.RawSignature = bytes.Clone(v)
 	}
 	return nil
 }
 
-// readBigSize reads a BOLT BigSize integer from b.
-// Encoding: 0x00-0xfc = 1 byte; 0xfd = 3 bytes (uint16); 0xfe = 5 bytes (uint32); 0xff = 9 bytes (uint64).
-// Non-canonical encodings are rejected.
+func decodeUTF8(v []byte, dst *string) error {
+	if !utf8.Valid(v) {
+		return fmt.Errorf("invalid UTF-8")
+	}
+	*dst = string(v)
+	return nil
+}
+
+func decodeNodeID(v []byte, dst *string) error {
+	if len(v) != 33 {
+		return fmt.Errorf("expected 33 bytes, got %d", len(v))
+	}
+	if v[0] != 0x02 && v[0] != 0x03 {
+		return fmt.Errorf("invalid parity byte 0x%02x", v[0])
+	}
+	*dst = hex.EncodeToString(v)
+	return nil
+}
+
+func decodeTU64(v []byte, dst *uint64) error {
+	n, err := readTU64(v)
+	if err != nil {
+		return err
+	}
+	*dst = n
+	return nil
+}
+
+func decodeBlindedPaths(data []byte) ([]types.BlindedPath, error) {
+	const pointLen = 33
+	var paths []types.BlindedPath
+	for pos := 0; pos < len(data); {
+		if len(data)-pos < pointLen*2+1 {
+			return nil, fmt.Errorf("blinded_path at %d: truncated header", pos)
+		}
+		path := types.BlindedPath{
+			IntroductionNodeID: bytes.Clone(data[pos : pos+pointLen]),
+			BlindingPoint:      bytes.Clone(data[pos+pointLen : pos+pointLen*2]),
+		}
+		pos += pointLen * 2
+
+		numHops, n, err := readBigSize(data[pos:])
+		if err != nil {
+			return nil, fmt.Errorf("blinded_path at %d: num_hops: %w", pos, err)
+		}
+		pos += n
+
+		if numHops > maxBlindedHops {
+			return nil, fmt.Errorf("blinded_path: num_hops %d exceeds limit", numHops)
+		}
+
+		path.Hops = make([]types.BlindedHop, numHops)
+		for i := range path.Hops {
+			hop, n, err := decodeBlindedHop(data[pos:], i)
+			if err != nil {
+				return nil, err
+			}
+			path.Hops[i] = hop
+			pos += n
+		}
+		paths = append(paths, path)
+	}
+	return paths, nil
+}
+
+func decodeBlindedHop(data []byte, idx int) (types.BlindedHop, int, error) {
+	const pointLen = 33
+	pos := 0
+	if len(data) < pointLen {
+		return types.BlindedHop{}, 0, fmt.Errorf("hop %d: truncated node id", idx)
+	}
+	hop := types.BlindedHop{BlindedNodeID: bytes.Clone(data[pos : pos+pointLen])}
+	pos += pointLen
+
+	if len(data)-pos < 2 {
+		return types.BlindedHop{}, 0, fmt.Errorf("hop %d: missing payload length", idx)
+	}
+	encLen := int(binary.BigEndian.Uint16(data[pos : pos+2]))
+	pos += 2
+
+	if len(data)-pos < encLen {
+		return types.BlindedHop{}, 0, fmt.Errorf("hop %d: payload truncated (want %d, have %d)", idx, encLen, len(data)-pos)
+	}
+	hop.EncryptedRecipientData = bytes.Clone(data[pos : pos+encLen])
+	pos += encLen
+
+	return hop, pos, nil
+}
+
 func readBigSize(b []byte) (uint64, int, error) {
 	if len(b) == 0 {
 		return 0, 0, fmt.Errorf("BigSize: empty buffer")
@@ -315,69 +328,16 @@ func readBigSize(b []byte) (uint64, int, error) {
 	}
 }
 
-// readTU64 decodes a BOLT truncated uint64 (tu64): big-endian, minimum bytes, no prefix.
-// Distinct from BigSize: tu64(1000) = [0x03, 0xE8]; BigSize(1000) = [0xfd, 0x03, 0xE8].
 func readTU64(b []byte) (uint64, error) {
-	if len(b) > 8 {
+	switch {
+	case len(b) > 8:
 		return 0, fmt.Errorf("tu64: too many bytes (%d)", len(b))
-	}
-	if len(b) == 0 {
+	case len(b) == 0:
 		return 0, nil
-	}
-	if b[0] == 0x00 && len(b) > 1 {
-		return 0, fmt.Errorf("tu64: non-canonical (leading zero byte)")
+	case b[0] == 0x00 && len(b) > 1:
+		return 0, fmt.Errorf("tu64: non-canonical (leading zero)")
 	}
 	var buf [8]byte
 	copy(buf[8-len(b):], b)
 	return binary.BigEndian.Uint64(buf[:]), nil
-}
-
-func decodeBlindedPaths(data []byte) ([]types.BlindedPath, error) {
-	const pointLen = 33
-	var paths []types.BlindedPath
-	pos := 0
-	for pos < len(data) {
-		if len(data)-pos < pointLen*2+1 {
-			return paths, fmt.Errorf("blinded_path at offset %d: insufficient header data", pos)
-		}
-		path := types.BlindedPath{
-			IntroductionNodeID: clone(data[pos : pos+pointLen]),
-			BlindingPoint:      clone(data[pos+pointLen : pos+pointLen*2]),
-		}
-		pos += pointLen * 2
-		numHops, n, err := readBigSize(data[pos:])
-		if err != nil {
-			return paths, fmt.Errorf("blinded_path: num_hops: %w", err)
-		}
-		pos += n
-		for i := uint64(0); i < numHops; i++ {
-			if len(data)-pos < pointLen {
-				return paths, fmt.Errorf("blinded_path hop %d: truncated blinded_node_id", i)
-			}
-			hop := types.BlindedHop{BlindedNodeID: clone(data[pos : pos+pointLen])}
-			pos += pointLen
-			if len(data)-pos < 2 {
-				return paths, fmt.Errorf("blinded_path hop %d: missing encrypted_data length", i)
-			}
-			encLen := int(binary.BigEndian.Uint16(data[pos : pos+2]))
-			pos += 2
-			if len(data)-pos < encLen {
-				return paths, fmt.Errorf("blinded_path hop %d: encrypted_data truncated", i)
-			}
-			hop.EncryptedRecipientData = clone(data[pos : pos+encLen])
-			pos += encLen
-			path.Hops = append(path.Hops, hop)
-		}
-		paths = append(paths, path)
-	}
-	return paths, nil
-}
-
-func clone(b []byte) []byte {
-	if b == nil {
-		return nil
-	}
-	c := make([]byte, len(b))
-	copy(c, b)
-	return c
 }
