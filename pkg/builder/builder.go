@@ -63,7 +63,7 @@ func (b *URIBuilder) Build() (string, error) {
         }
         sb.WriteString(p.key)
         sb.WriteByte('=')
-        sb.WriteString(url.QueryEscape(p.value))
+        sb.WriteString(url.PathEscape(p.value))
     }
     return sb.String(), nil
 }
