@@ -158,6 +158,8 @@ func parseTLVStream(data []byte, d *types.BOLT12OfferDetails) error {
 	return nil
 }
 
+// decodeTLVField dispatches scalar and string TLV fields, delegating raw-byte
+// fields to decodeTLVFieldBytes to keep cyclomatic complexity manageable.
 func decodeTLVField(t uint64, v []byte, d *types.BOLT12OfferDetails) error {
 	switch t {
 	case tlvOfferDescription:
@@ -172,6 +174,14 @@ func decodeTLVField(t uint64, v []byte, d *types.BOLT12OfferDetails) error {
 		return decodeTU64(v, &d.QuantityMax)
 	case tlvOfferAbsoluteExpiry:
 		return decodeTU64(v, &d.AbsoluteExpiry)
+	}
+	return decodeTLVFieldBytes(t, v, d)
+}
+
+// decodeTLVFieldBytes handles TLV fields whose values are stored as raw byte
+// slices, including size-validated fixed-width fields.
+func decodeTLVFieldBytes(t uint64, v []byte, d *types.BOLT12OfferDetails) error {
+	switch t {
 	case tlvOfferCurrency:
 		if len(v) != 3 {
 			return fmt.Errorf("expected 3 bytes, got %d", len(v))
