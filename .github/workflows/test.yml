@@ -1,12 +1,34 @@
 name: test
+
 on: [push, pull_request]
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
-      - run: go test ./...
-      - run: go vet $(go list ./... | grep -v internal/dnssec)
+          go-version: '1.24'
+
+      - name: gofmt
+        run: |
+          files=$(gofmt -s -l .)
+          if [ -n "$files" ]; then
+            echo "these files need gofmt -s:"
+            echo "$files"
+            exit 1
+          fi
+
+      - name: vet
+        run: go vet $(go list ./... | grep -v internal/dnssec)
+
+      - name: test
+        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: upload coverage
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}

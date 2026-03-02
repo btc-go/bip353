@@ -234,49 +234,48 @@ func trunc(s string, n int) string {
 }
 
 func ParseVerifiedProof(proofBytes []byte, hra types.HumanReadableAddress) (*types.PaymentInstruction, error) {
-    expectedName := hra.DNSName()
+	expectedName := hra.DNSName()
 
-    resultJSON := dnssec.VerifyByteStream(proofBytes, expectedName)
+	resultJSON := dnssec.VerifyByteStream(proofBytes, expectedName)
 
-    var vr struct {
-        Error       string `json:"error"`
-        MaxCacheTTL uint32 `json:"max_cache_ttl"`
-        VerifiedRRs []struct {
-            Type     string `json:"type"`
-            Contents string `json:"contents"`
-        } `json:"verified_rrs"`
-    }
-    if err := json.Unmarshal([]byte(resultJSON), &vr); err != nil {
-        return nil, fmt.Errorf("bip353: failed to parse proof result: %w", err)
-    }
-    if vr.Error != "" {
-        return nil, fmt.Errorf("bip353: DNSSEC validation failed: %s", vr.Error)
-    }
+	var vr struct {
+		Error       string `json:"error"`
+		MaxCacheTTL uint32 `json:"max_cache_ttl"`
+		VerifiedRRs []struct {
+			Type     string `json:"type"`
+			Contents string `json:"contents"`
+		} `json:"verified_rrs"`
+	}
+	if err := json.Unmarshal([]byte(resultJSON), &vr); err != nil {
+		return nil, fmt.Errorf("bip353: failed to parse proof result: %w", err)
+	}
+	if vr.Error != "" {
+		return nil, fmt.Errorf("bip353: DNSSEC validation failed: %s", vr.Error)
+	}
 
-    var bip353Records []string
-    for _, rr := range vr.VerifiedRRs {
-        if rr.Type == "txt" && strings.HasPrefix(strings.ToLower(rr.Contents), "bitcoin:") {
-            bip353Records = append(bip353Records, rr.Contents)
-        }
-    }
-    if len(bip353Records) == 0 {
-        return nil, fmt.Errorf("bip353: %w at %s", types.ErrNoRecord, expectedName)
-    }
-    if len(bip353Records) > 1 {
-        return nil, fmt.Errorf("bip353: %w at %s (%d records)", types.ErrAmbiguousRecord, expectedName, len(bip353Records))
-    }
+	var bip353Records []string
+	for _, rr := range vr.VerifiedRRs {
+		if rr.Type == "txt" && strings.HasPrefix(strings.ToLower(rr.Contents), "bitcoin:") {
+			bip353Records = append(bip353Records, rr.Contents)
+		}
+	}
+	if len(bip353Records) == 0 {
+		return nil, fmt.Errorf("bip353: %w at %s", types.ErrNoRecord, expectedName)
+	}
+	if len(bip353Records) > 1 {
+		return nil, fmt.Errorf("bip353: %w at %s (%d records)", types.ErrAmbiguousRecord, expectedName, len(bip353Records))
+	}
 
-    r := &Resolver{opts: DefaultOptions()}
-    rawRecord := bip353Records[0]
-    inst, err := r.buildInstruction(rawRecord)
-    if err != nil {
-        return nil, fmt.Errorf("bip353: parsing record: %w", err)
-    }
-    inst.OriginalAddress = hra
-    inst.DNSSECValidated = true
-    inst.RawTXTRecord = rawRecord
-    inst.TTL = vr.MaxCacheTTL
+	r := &Resolver{opts: DefaultOptions()}
+	rawRecord := bip353Records[0]
+	inst, err := r.buildInstruction(rawRecord)
+	if err != nil {
+		return nil, fmt.Errorf("bip353: parsing record: %w", err)
+	}
+	inst.OriginalAddress = hra
+	inst.DNSSECValidated = true
+	inst.RawTXTRecord = rawRecord
+	inst.TTL = vr.MaxCacheTTL
 
-    return inst, nil
+	return inst, nil
 }
-

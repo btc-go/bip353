@@ -160,14 +160,12 @@ func TestIntegration_PrefixForms(t *testing.T) {
 	}
 }
 
-
 func TestIntegration_AmbiguousRecord(t *testing.T) {
 	_, err := integrationResolver(t).Resolve(ctx(t), "invalid@dnssec_proof_tests.bitcoin.ninja")
 	if !errors.Is(err, bip353.ErrAmbiguousRecord) {
 		t.Errorf("expected ErrAmbiguousRecord, got: %v", err)
 	}
 }
-
 
 func TestIntegration_Punycode(t *testing.T) {
 	dnsName, err := bip353.DNSNameFor("alice@bücher.example")

@@ -38,10 +38,12 @@ var (
 	ErrRequiredParam   = types.ErrRequiredParam
 )
 
-func DefaultOptions() Options                                          { return resolver.DefaultOptions() }
-func NewDoHTransport(provider string) (*tr.DoHTransport, error)        { return tr.NewDoHTransport(provider) }
-func NewDoHTransportWithURL(u string) (*tr.DoHTransport, error)        { return tr.NewDoHTransportWithURL(u) }
-func NewTorTransport(proxy, provider string) (*tr.TorTransport, error) { return tr.NewTorTransport(proxy, provider) }
+func DefaultOptions() Options                                   { return resolver.DefaultOptions() }
+func NewDoHTransport(provider string) (*tr.DoHTransport, error) { return tr.NewDoHTransport(provider) }
+func NewDoHTransportWithURL(u string) (*tr.DoHTransport, error) { return tr.NewDoHTransportWithURL(u) }
+func NewTorTransport(proxy, provider string) (*tr.TorTransport, error) {
+	return tr.NewTorTransport(proxy, provider)
+}
 func ParseAddress(address string) (HumanReadableAddress, error) {
 	return types.ParseHumanReadableAddress(address)
 }

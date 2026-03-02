@@ -106,7 +106,6 @@ func bech32Decode(s, hrp string) ([]byte, error) {
 	return convertBits(b32, 5, 8)
 }
 
-
 func convertBits(data []byte, from, to uint) ([]byte, error) {
 	var acc, bits int
 	out := make([]byte, 0, len(data)*int(from)/int(to)+1)
