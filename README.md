@@ -2,7 +2,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/btc-go/bip353/actions/workflows/test.yml/badge.svg)](https://github.com/btc-go/bip353/actions/workflows/test.yml)
 [![CodeQL](https://github.com/btc-go/bip353/actions/workflows/codeql.yml/badge.svg)](https://github.com/btc-go/bip353/actions/workflows/codeql.yml)
-
+[![Go Report Card](https://goreportcard.com/badge/github.com/btc-go/bip353)](https://goreportcard.com/report/github.com/btc-go/bip353)
 
 A Go implementation of [BIP-353: DNS Payment Instructions](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki).
 
