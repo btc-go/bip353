@@ -91,6 +91,6 @@ func CheckTorProxy(proxyAddr string) error {
 	if err != nil {
 		return fmt.Errorf("tor proxy at %s not reachable: %w", proxyAddr, err)
 	}
-	conn.Close()
+	_ = conn.Close()
 	return nil
 }

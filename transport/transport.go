@@ -157,7 +157,7 @@ func sendTCPQuery(ctx context.Context, query []byte, server string, timeout time
 	if err != nil {
 		return nil, fmt.Errorf("%s: connect: %w", server, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if timeout > 0 {
 		if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {

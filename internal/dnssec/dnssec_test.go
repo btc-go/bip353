@@ -21,14 +21,14 @@ func sendQuery(pb *ProofBuilder, server string) error {
 		buf[0] = byte(msgLen >> 8)
 		buf[1] = byte(msgLen)
 		copy(buf[2:], *query)
-		conn.Write(buf)
+		_, _ = conn.Write(buf)
 		lenBuf := make([]byte, 2)
-		conn.Read(lenBuf)
+		_, _ = conn.Read(lenBuf)
 		respLen := int(lenBuf[0])<<8 | int(lenBuf[1])
 		resp := make([]byte, respLen)
-		conn.Read(resp)
-		conn.Close()
-		pb.ProcessQueryResponse(resp)
+		_, _ = conn.Read(resp)
+		_ = conn.Close()
+		_ = pb.ProcessQueryResponse(resp)
 	}
 }
 
