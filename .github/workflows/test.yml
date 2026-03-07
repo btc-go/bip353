@@ -26,9 +26,3 @@ jobs:
 
       - name: test
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
-
-      - name: upload coverage
-        uses: codecov/codecov-action@v5
-        with:
-          files: coverage.out
-          token: ${{ secrets.CODECOV_TOKEN }}
