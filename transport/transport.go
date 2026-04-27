@@ -43,6 +43,8 @@ var DefaultNameservers = []string{
 // resolveWithProver runs the dnssec-prover proof-building loop using sendQuery
 // to exchange raw DNS messages. All transports go through this — chain
 // validation always happens locally, never delegated to the remote resolver.
+const maxProofQueries = 30
+
 func resolveWithProver(ctx context.Context, name, transportName string, sendQuery queryFunc) (*QueryResult, error) {
 	builder := dnssec.InitProofBuilder(name, dns.TypeTXT)
 	if builder == nil || *builder == nil {
@@ -50,7 +52,10 @@ func resolveWithProver(ctx context.Context, name, transportName string, sendQuer
 	}
 	pb := *builder
 
-	for {
+	for i := 0; ; i++ {
+		if i >= maxProofQueries {
+			return nil, fmt.Errorf("bip353/%s: proof building exceeded %d queries for %s", transportName, maxProofQueries, name)
+		}
 		select {
 		case <-ctx.Done():
 			return nil, fmt.Errorf("bip353/%s: %w", transportName, ctx.Err())

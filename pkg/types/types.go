@@ -190,7 +190,7 @@ func validateUser(user string) error {
 		}
 	}
 	for _, r := range user {
-		if unicode.IsSpace(r) || r == '@' || r == '\x00' {
+		if unicode.IsSpace(r) || r == '@' || r == '\x00' || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Cc, r) {
 			return fmt.Errorf("user part contains invalid character: %q", r)
 		}
 	}
