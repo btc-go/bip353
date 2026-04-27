@@ -57,8 +57,22 @@ func NewTorTransport(proxyAddr, dohProvider string) (*TorTransport, error) {
 	if cd, ok := torDialer.(proxy.ContextDialer); ok {
 		dialContext = cd.DialContext
 	} else {
-		dialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
-			return torDialer.Dial(network, addr)
+		dialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			type result struct {
+				conn net.Conn
+				err  error
+			}
+			ch := make(chan result, 1)
+			go func() {
+				c, err := torDialer.Dial(network, addr)
+				ch <- result{c, err}
+			}()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case r := <-ch:
+				return r.conn, r.err
+			}
 		}
 	}
 
