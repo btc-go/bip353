@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -190,7 +191,12 @@ func validateUser(user string) error {
 		}
 	}
 	for _, r := range user {
-		if unicode.IsSpace(r) || r == '@' || r == '\x00' || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Cc, r) {
+		if unicode.IsSpace(r) || r == '@' || r == '\x00' || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Cc, r) ||
+			unicode.In(r, unicode.Mn, unicode.Me, unicode.Mc) ||
+			r == '\u3164' || r == '\u115f' || r == '\u1160' || r == '\uffa0' || r == '\u2800' {
+			return fmt.Errorf("user part contains invalid character: %q", r)
+		}
+		if r < 0x80 && !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
 			return fmt.Errorf("user part contains invalid character: %q", r)
 		}
 	}
@@ -228,6 +234,12 @@ func validateDomain(domain string) error {
 		if isASCII(label) {
 			if !isAlphaNum(rune(label[0])) || !isAlphaNum(rune(label[len(label)-1])) {
 				return fmt.Errorf("domain label %q must start and end with an alphanumeric character", label)
+			}
+			for i := 0; i < len(label); i++ {
+				c := rune(label[i])
+				if !isAlphaNum(c) && c != '-' && c != '_' {
+					return fmt.Errorf("domain label %q contains invalid character %q", label, c)
+				}
 			}
 		}
 	}
@@ -269,12 +281,25 @@ func isAlphaNum(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 }
 
-func normalizeParams(params url.Values) url.Values {
-	normalized := make(url.Values, len(params))
-	for k, v := range params {
-		normalized[strings.ToLower(k)] = v
+// normalizeParams lowercases keys. Only bc/tb may legitimately repeat (several
+// fallback addresses); any other duplicate or case-colliding key is rejected so
+// different parsers can't disagree about which value wins.
+func normalizeParams(params url.Values) (url.Values, error) {
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		keys = append(keys, k)
 	}
-	return normalized
+	sort.Strings(keys)
+	normalized := make(url.Values, len(params))
+	for _, k := range keys {
+		lk := strings.ToLower(k)
+		multi := lk == "bc" || lk == "tb"
+		if !multi && (len(params[k]) != 1 || len(normalized[lk]) != 0) {
+			return nil, fmt.Errorf("%w: duplicate parameter %q", ErrInvalidURI, lk)
+		}
+		normalized[lk] = append(normalized[lk], params[k]...)
+	}
+	return normalized, nil
 }
 
 func ParseBIP21URI(uri string) (*ParsedBIP21, error) {
@@ -293,7 +318,10 @@ func ParseBIP21URI(uri string) (*ParsedBIP21, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w: bad query string: %v", ErrInvalidURI, err)
 		}
-		result.Params = normalizeParams(params)
+		result.Params, err = normalizeParams(params)
+		if err != nil {
+			return nil, err
+		}
 		for k := range result.Params {
 			if strings.HasPrefix(k, "req-") {
 				known := map[string]bool{"req-pop": true}

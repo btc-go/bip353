@@ -52,6 +52,16 @@ func (b *URIBuilder) Build() (string, error) {
 	if b.address == "" && len(b.params) == 0 {
 		return "", fmt.Errorf("bip21: URI must have an address or at least one parameter")
 	}
+	if strings.ContainsAny(b.address, "?&#%= \t\r\n\x00") {
+		return "", fmt.Errorf("bip21: address contains invalid characters")
+	}
+	for _, p := range b.params {
+		if p.key == "" || strings.IndexFunc(p.key, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-')
+		}) >= 0 {
+			return "", fmt.Errorf("bip21: invalid parameter key %q", p.key)
+		}
+	}
 	var sb strings.Builder
 	sb.WriteString("bitcoin:")
 	sb.WriteString(b.address)
@@ -63,7 +73,7 @@ func (b *URIBuilder) Build() (string, error) {
 		}
 		sb.WriteString(p.key)
 		sb.WriteByte('=')
-		sb.WriteString(url.PathEscape(p.value))
+		sb.WriteString(escapeValue(p.value))
 	}
 	return sb.String(), nil
 }
@@ -84,4 +94,11 @@ func (b *URIBuilder) set(key, value string) *URIBuilder {
 		b.params = append(b.params, param{key, value})
 	}
 	return b
+}
+
+// escapeValue percent-encodes a parameter value so it cannot terminate or
+// inject other parameters. Bech32 strings (lno, sp) are unaffected.
+func escapeValue(v string) string {
+	r := strings.NewReplacer("&", "%26", "=", "%3D")
+	return r.Replace(url.PathEscape(v))
 }

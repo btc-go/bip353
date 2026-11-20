@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/btc-go/bip353/internal/dnssec"
@@ -43,14 +44,26 @@ var DefaultNameservers = []string{
 // resolveWithProver runs the dnssec-prover proof-building loop using sendQuery
 // to exchange raw DNS messages. All transports go through this — chain
 // validation always happens locally, never delegated to the remote resolver.
-const maxProofQueries = 30
+const (
+	maxProofQueries = 30
+	maxLookupTime   = 45 * time.Second
+)
 
-func resolveWithProver(ctx context.Context, name, transportName string, sendQuery queryFunc) (*QueryResult, error) {
+func resolveWithProver(ctx context.Context, name, transportName string, sendQuery queryFunc) (res *QueryResult, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			res, err = nil, fmt.Errorf("bip353/%s: dnssec prover panic: %v", transportName, r)
+		}
+	}()
 	builder := dnssec.InitProofBuilder(name, dns.TypeTXT)
 	if builder == nil || *builder == nil {
 		return nil, fmt.Errorf("bip353/%s: failed to init proof builder for %s", transportName, name)
 	}
 	pb := *builder
+
+	// Overall deadline so a black-holing resolver can't stall callers for minutes.
+	ctx, cancel := context.WithTimeout(ctx, maxLookupTime)
+	defer cancel()
 
 	for i := 0; ; i++ {
 		if i >= maxProofQueries {
@@ -82,34 +95,65 @@ func resolveWithProver(ctx context.Context, name, transportName string, sendQuer
 		return nil, fmt.Errorf("NXDOMAIN: %s", name)
 	}
 
-	return parseProofResult(dnssec.VerifyByteStream(*proof, name), transportName)
+	return parseProofResult(dnssec.VerifyByteStream(*proof, name), name, transportName)
 }
 
-func parseProofResult(resultJSON, transportName string) (*QueryResult, error) {
+func parseProofResult(resultJSON, name, transportName string) (*QueryResult, error) {
+	records, ttl, err := ParseVerifiedJSON(resultJSON, name, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("bip353/%s: %w", transportName, err)
+	}
+	return &QueryResult{Transport: transportName, TTL: ttl, Records: records}, nil
+}
+
+// clockSkew tolerates small clock differences when checking RRSIG validity.
+const clockSkew = 5 * time.Minute
+
+// ParseVerifiedJSON parses dnssec-prover's verification output and returns the
+// TXT records owned by name. Unlike the prover itself, it enforces the RRSIG
+// validity window (valid_from/expires) so replayed stale proofs are rejected,
+// and only accepts records whose owner name matches the requested name.
+func ParseVerifiedJSON(resultJSON, name string, now time.Time) (records []string, ttl uint32, err error) {
 	var vr struct {
 		Error       string `json:"error"`
+		ValidFrom   int64  `json:"valid_from"`
+		Expires     int64  `json:"expires"`
 		MaxCacheTTL uint32 `json:"max_cache_ttl"`
 		VerifiedRRs []struct {
 			Type     string `json:"type"`
+			Name     string `json:"name"`
 			Contents string `json:"contents"`
 		} `json:"verified_rrs"`
 	}
 	if err := json.Unmarshal([]byte(resultJSON), &vr); err != nil {
-		return nil, fmt.Errorf("bip353/%s: failed to parse proof result: %w", transportName, err)
+		return nil, 0, fmt.Errorf("failed to parse proof result: %w", err)
 	}
 	if vr.Error != "" {
-		return nil, fmt.Errorf("bip353/%s: DNSSEC validation failed: %s", transportName, vr.Error)
+		return nil, 0, fmt.Errorf("DNSSEC validation failed: %s", vr.Error)
 	}
-	result := &QueryResult{
-		Transport: transportName,
-		TTL:       vr.MaxCacheTTL,
+	if vr.Expires == 0 {
+		return nil, 0, fmt.Errorf("DNSSEC proof carries no validity window")
 	}
+	if now.Add(clockSkew).Unix() < vr.ValidFrom {
+		return nil, 0, fmt.Errorf("DNSSEC proof is not yet valid")
+	}
+	if now.Add(-clockSkew).Unix() > vr.Expires {
+		return nil, 0, fmt.Errorf("DNSSEC proof has expired")
+	}
+	ttl = vr.MaxCacheTTL
+	if remaining := vr.Expires - now.Unix(); remaining < int64(ttl) {
+		if remaining < 0 {
+			remaining = 0
+		}
+		ttl = uint32(remaining)
+	}
+	want := strings.ToLower(strings.TrimSuffix(name, "."))
 	for _, rr := range vr.VerifiedRRs {
-		if rr.Type == "txt" {
-			result.Records = append(result.Records, rr.Contents)
+		if rr.Type == "txt" && strings.ToLower(strings.TrimSuffix(rr.Name, ".")) == want {
+			records = append(records, rr.Contents)
 		}
 	}
-	return result, nil
+	return records, ttl, nil
 }
 
 // FullValidationTransport is the default transport. Sends DNS queries directly
@@ -212,7 +256,7 @@ func SystemNameservers() []string {
 	out := make([]string, 0, len(cfg.Servers))
 	for _, s := range cfg.Servers {
 		if net.ParseIP(s) != nil {
-			out = append(out, s+":53")
+			out = append(out, net.JoinHostPort(s, "53"))
 		} else {
 			out = append(out, s)
 		}

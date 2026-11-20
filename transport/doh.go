@@ -34,17 +34,29 @@ func NewDoHTransport(provider string) (*DoHTransport, error) {
 	}
 	return &DoHTransport{
 		Endpoints: []string{endpoint},
-		Client:    &http.Client{Timeout: DefaultTimeout},
+		Client:    newHTTPClient(),
 	}, nil
 }
 
+// noRedirect makes redirects fail (surfacing as a non-200 status) so a relay
+// cannot bounce queries to another host or downgrade to plaintext.
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+func newHTTPClient() *http.Client {
+	return &http.Client{Timeout: DefaultTimeout, CheckRedirect: noRedirect}
+}
+
 func NewDoHTransportWithURL(endpoint string) (*DoHTransport, error) {
-	if _, err := url.ParseRequestURI(endpoint); err != nil {
+	u, err := url.ParseRequestURI(endpoint)
+	if err != nil {
 		return nil, fmt.Errorf("doh: invalid endpoint URL %q: %w", endpoint, err)
+	}
+	if u.Scheme != "https" || u.Host == "" {
+		return nil, fmt.Errorf("doh: endpoint must be an https:// URL with a host: %q", endpoint)
 	}
 	return &DoHTransport{
 		Endpoints: []string{endpoint},
-		Client:    &http.Client{Timeout: DefaultTimeout},
+		Client:    newHTTPClient(),
 	}, nil
 }
 
@@ -55,7 +67,7 @@ func (t *DoHTransport) LookupTXT(ctx context.Context, name string) (*QueryResult
 func (t *DoHTransport) sendQuery(ctx context.Context, query []byte) ([]byte, error) {
 	client := t.Client
 	if client == nil {
-		client = &http.Client{Timeout: DefaultTimeout}
+		client = newHTTPClient()
 	}
 	var lastErr error
 	for _, endpoint := range t.Endpoints {
@@ -89,9 +101,16 @@ func sendDoHQuery(ctx context.Context, client *http.Client, endpoint string, que
 		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, endpoint)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	const maxBody = 64 * 1024
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
+	}
+	if len(body) > maxBody {
+		return nil, fmt.Errorf("response from %s too large", endpoint)
+	}
+	if len(body) < 12 || len(query) < 2 || body[0] != query[0] || body[1] != query[1] {
+		return nil, fmt.Errorf("malformed or mismatched DNS response from %s", endpoint)
 	}
 	return body, nil
 }

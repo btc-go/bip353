@@ -45,6 +45,17 @@ func Decode(addr string) (*types.SilentPaymentDetails, error) {
 	if addr == "" {
 		return nil, fmt.Errorf("silentpayment: empty address")
 	}
+	if len(addr) > 1023 {
+		return nil, fmt.Errorf("silent payment: address too long")
+	}
+	for i := 0; i < len(addr); i++ {
+		if addr[i] >= 0x80 {
+			return nil, fmt.Errorf("silent payment: non-ASCII character in address")
+		}
+	}
+	if addr != strings.ToLower(addr) && addr != strings.ToUpper(addr) {
+		return nil, fmt.Errorf("silent payment: mixed-case address")
+	}
 	lower := strings.ToLower(addr)
 	hrp, network := hrpForAddress(lower)
 	if hrp == "" {

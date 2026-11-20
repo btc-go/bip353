@@ -96,10 +96,11 @@ func bech32Decode(s, hrp string) ([]byte, error) {
 		return nil, fmt.Errorf("bolt12: data part empty")
 	}
 	b32 := make([]byte, len(dataPart))
-	for i, c := range dataPart {
+	for i := 0; i < len(dataPart); i++ {
+		c := dataPart[i]
 		v := bech32Values[c]
 		if v == 255 {
-			return nil, fmt.Errorf("bolt12: invalid character %q at position %d", c, i)
+			return nil, fmt.Errorf("bolt12: invalid character %q at position %d", rune(c), i)
 		}
 		b32[i] = v
 	}
@@ -150,6 +151,11 @@ func parseTLVStream(data []byte, d *types.BOLT12OfferDetails) error {
 		}
 		val := data[pos : pos+int(length)]
 		pos += int(length)
+
+		// BOLT-12: readers MUST reject unknown even types in the offer range (<80).
+		if tlvType%2 == 0 && tlvType < 80 && tlvType > tlvOfferNodeID {
+			return fmt.Errorf("unknown even TLV type %d", tlvType)
+		}
 
 		if err := decodeTLVField(tlvType, val, d); err != nil && tlvType%2 == 0 {
 			return fmt.Errorf("type %d: %w", tlvType, err)
