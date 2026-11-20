@@ -46,3 +46,9 @@ jobs:
             sleep 20
           done
           echo "proxy did not serve ${TAG} yet; it will be fetched on first use" >&2
+      - name: Request pkg.go.dev indexing
+        env:
+          TAG: ${{ needs.release-please.outputs.tag }}
+        run: |
+          # pkg.go.dev otherwise ingests new versions from the module index on its own schedule.
+          curl -fsS -X POST "https://pkg.go.dev/fetch/github.com/btc-go/bip353@${TAG}" || echo "pkg.go.dev fetch request failed; it will index on its own" >&2
