@@ -2,6 +2,9 @@ name: test
 
 on: [push, pull_request]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -10,7 +13,10 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.27.4'
+
+      - name: verify native libraries
+        run: cd internal/dnssec && sha256sum -c SHA256SUMS --ignore-missing
 
       - name: gofmt
         run: |
