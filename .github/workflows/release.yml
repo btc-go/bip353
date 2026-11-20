@@ -1,0 +1,48 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.rp.outputs.release_created }}
+      tag: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - id: rp
+        uses: googleapis/release-please-action@v4
+        with:
+          # Needs a PAT/App token: the btc-go org blocks GITHUB_TOKEN from creating
+          # PRs, and PRs/tags made by GITHUB_TOKEN wouldn't trigger test/CodeQL runs.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # Ask the Go module proxy for the new version so pkg.go.dev and `go get`
+  # pick it up immediately instead of whenever someone first requests it.
+  publish-to-go-proxy:
+    needs: release-please
+    if: needs.release-please.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.4'
+      - name: Warm proxy.golang.org
+        env:
+          GOPROXY: https://proxy.golang.org
+          GOFLAGS: -mod=mod
+          TAG: ${{ needs.release-please.outputs.tag }}
+        run: |
+          mkdir probe && cd probe && go mod init probe
+          for i in 1 2 3 4 5; do
+            go list -m "github.com/btc-go/bip353@${TAG}" && exit 0
+            sleep 20
+          done
+          echo "proxy did not serve ${TAG} yet; it will be fetched on first use" >&2
