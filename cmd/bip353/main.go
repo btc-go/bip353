@@ -111,19 +111,19 @@ func buildResolver(spec, torProxy, nameservers string) (*bip353.Resolver, error)
 }
 
 func printInstruction(inst *bip353.PaymentInstruction) {
-	fmt.Printf("Resolved: %s\n", inst.OriginalAddress)
+	fmt.Printf("Resolved: %s\n", bip353.SanitizeText(inst.OriginalAddress.String()))
 	fmt.Printf("Type:     %s\n", inst.PaymentType)
 	fmt.Printf("Reusable: %v\n", inst.IsReusable)
 	fmt.Printf("DNSSEC:   %v\n", inst.DNSSECValidated)
 	switch inst.PaymentType {
 	case bip353.PaymentTypeLightningBOLT12:
-		fmt.Printf("Offer:    %s\n", inst.BOLT12Offer)
+		fmt.Printf("Offer:    %s\n", bip353.SanitizeText(inst.BOLT12Offer))
 	case bip353.PaymentTypeSilentPayment:
-		fmt.Printf("Address:  %s\n", inst.SilentPaymentAddress)
+		fmt.Printf("Address:  %s\n", bip353.SanitizeText(inst.SilentPaymentAddress))
 	case bip353.PaymentTypeLightningBOLT11:
-		fmt.Printf("Invoice:  %s\n", inst.BOLT11Invoice)
+		fmt.Printf("Invoice:  %s\n", bip353.SanitizeText(inst.BOLT11Invoice))
 	case bip353.PaymentTypeOnChain:
-		fmt.Printf("Address:  %s\n", inst.OnChainAddress)
+		fmt.Printf("Address:  %s\n", bip353.SanitizeText(inst.OnChainAddress))
 	}
 }
 
@@ -199,21 +199,21 @@ func decodeBOLT12(offer string) error {
 	}
 	fmt.Printf("Type:          %s\n", details.Type)
 	if details.Description != "" {
-		fmt.Printf("Description:   %s\n", details.Description)
+		fmt.Printf("Description:   %s\n", bip353.SanitizeText(details.Description))
 	}
 	if details.Issuer != "" {
-		fmt.Printf("Issuer:        %s\n", details.Issuer)
+		fmt.Printf("Issuer:        %s\n", bip353.SanitizeText(details.Issuer))
 	}
 	if details.NodeID != "" {
-		fmt.Printf("Node ID:       %s\n", details.NodeID)
+		fmt.Printf("Node ID:       %s\n", bip353.SanitizeText(details.NodeID))
 	}
-	if details.AmountMsat > 0 {
+	if details.AmountMsat > 0 && details.Currency == "" {
 		fmt.Printf("Amount:        %d msat (%.8f BTC)\n", details.AmountMsat, float64(details.AmountMsat)/1e11)
 	} else {
 		fmt.Println("Amount:        (payer sets amount)")
 	}
 	if details.Currency != "" {
-		fmt.Printf("Currency:      %s\n", details.Currency)
+		fmt.Printf("Currency:      %s\n", bip353.SanitizeText(details.Currency))
 	}
 	if details.AbsoluteExpiry > 0 {
 		fmt.Printf("Expires:       %d (unix)\n", details.AbsoluteExpiry)

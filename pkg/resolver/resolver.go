@@ -2,9 +2,9 @@ package resolver
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/btc-go/bip353/internal/dnssec"
 	"github.com/btc-go/bip353/pkg/bolt12"
@@ -70,6 +70,9 @@ func (r *Resolver) ResolveUser(ctx context.Context, user, domain string) (*types
 }
 
 func (r *Resolver) ResolveHRA(ctx context.Context, hra types.HumanReadableAddress) (*types.PaymentInstruction, error) {
+	if _, err := types.ParseHumanReadableAddress(hra.User + "@" + hra.Domain); err != nil {
+		return nil, fmt.Errorf("bip353: %w", err)
+	}
 	dnsName := hra.DNSName()
 	qResult, err := r.transport.LookupTXT(ctx, dnsName)
 	if err != nil {
@@ -186,18 +189,18 @@ func FormatSummary(inst *types.PaymentInstruction) string {
 		fmt.Fprintf(&b, "DNS TTL:          %ds\n", inst.TTL)
 	}
 	if inst.BOLT12Offer != "" {
-		fmt.Fprintf(&b, "BOLT-12 offer:    %s\n", trunc(inst.BOLT12Offer, 60))
+		fmt.Fprintf(&b, "BOLT-12 offer:    %s\n", types.SanitizeText(trunc(inst.BOLT12Offer, 60)))
 		if d := inst.BOLT12Details; d != nil {
 			if d.Description != "" {
-				fmt.Fprintf(&b, "  Description:    %s\n", d.Description)
+				fmt.Fprintf(&b, "  Description:    %s\n", types.SanitizeText(d.Description))
 			}
 			if d.Issuer != "" {
-				fmt.Fprintf(&b, "  Issuer:         %s\n", d.Issuer)
+				fmt.Fprintf(&b, "  Issuer:         %s\n", types.SanitizeText(d.Issuer))
 			}
 			if d.NodeID != "" {
-				fmt.Fprintf(&b, "  Node ID:        %s\n", trunc(d.NodeID, 20)+"…")
+				fmt.Fprintf(&b, "  Node ID:        %s\n", types.SanitizeText(trunc(d.NodeID, 20))+"…")
 			}
-			if d.AmountMsat > 0 {
+			if d.AmountMsat > 0 && d.Currency == "" {
 				fmt.Fprintf(&b, "  Amount:         %d msat\n", d.AmountMsat)
 			}
 			if d.AbsoluteExpiry > 0 {
@@ -206,18 +209,18 @@ func FormatSummary(inst *types.PaymentInstruction) string {
 		}
 	}
 	if inst.BOLT11Invoice != "" {
-		fmt.Fprintf(&b, "BOLT-11 invoice:  %s\n", trunc(inst.BOLT11Invoice, 60))
+		fmt.Fprintf(&b, "BOLT-11 invoice:  %s\n", types.SanitizeText(trunc(inst.BOLT11Invoice, 60)))
 	}
 	if inst.OnChainAddress != "" {
-		fmt.Fprintf(&b, "On-chain address: %s\n", inst.OnChainAddress)
+		fmt.Fprintf(&b, "On-chain address: %s\n", types.SanitizeText(inst.OnChainAddress))
 		if len(inst.OnChainAddresses) > 1 {
 			for _, a := range inst.OnChainAddresses[1:] {
-				fmt.Fprintf(&b, "                  %s\n", a)
+				fmt.Fprintf(&b, "                  %s\n", types.SanitizeText(a))
 			}
 		}
 	}
 	if inst.SilentPaymentAddress != "" {
-		fmt.Fprintf(&b, "Silent payment:   %s\n", trunc(inst.SilentPaymentAddress, 60))
+		fmt.Fprintf(&b, "Silent payment:   %s\n", types.SanitizeText(trunc(inst.SilentPaymentAddress, 60)))
 		if d := inst.SilentPaymentDetails; d != nil {
 			fmt.Fprintf(&b, "  Network:        %s\n", d.Network)
 			fmt.Fprintf(&b, "  Version:        %d\n", d.Version)
@@ -236,27 +239,29 @@ func trunc(s string, n int) string {
 func ParseVerifiedProof(proofBytes []byte, hra types.HumanReadableAddress) (*types.PaymentInstruction, error) {
 	expectedName := hra.DNSName()
 
-	resultJSON := dnssec.VerifyByteStream(proofBytes, expectedName)
+	if len(proofBytes) == 0 || len(proofBytes) > maxProofBytes {
+		return nil, fmt.Errorf("bip353: proof size %d out of range", len(proofBytes))
+	}
+	if _, err := types.ParseHumanReadableAddress(hra.User + "@" + hra.Domain); err != nil {
+		return nil, fmt.Errorf("bip353: %w", err)
+	}
 
-	var vr struct {
-		Error       string `json:"error"`
-		MaxCacheTTL uint32 `json:"max_cache_ttl"`
-		VerifiedRRs []struct {
-			Type     string `json:"type"`
-			Contents string `json:"contents"`
-		} `json:"verified_rrs"`
+	resultJSON, err := safeVerify(proofBytes, expectedName)
+	if err != nil {
+		return nil, fmt.Errorf("bip353: %w", err)
 	}
-	if err := json.Unmarshal([]byte(resultJSON), &vr); err != nil {
-		return nil, fmt.Errorf("bip353: failed to parse proof result: %w", err)
-	}
-	if vr.Error != "" {
-		return nil, fmt.Errorf("bip353: DNSSEC validation failed: %s", vr.Error)
+	records, ttl, err := transport.ParseVerifiedJSON(resultJSON, expectedName, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("bip353: %w", err)
 	}
 
 	var bip353Records []string
-	for _, rr := range vr.VerifiedRRs {
-		if rr.Type == "txt" && strings.HasPrefix(strings.ToLower(rr.Contents), "bitcoin:") {
-			bip353Records = append(bip353Records, rr.Contents)
+	for _, rec := range records {
+		if strings.HasPrefix(strings.ToLower(rec), "bitcoin:") {
+			if len(rec) > maxTXTLength {
+				return nil, fmt.Errorf("bip353: TXT record at %s exceeds %d bytes", expectedName, maxTXTLength)
+			}
+			bip353Records = append(bip353Records, rec)
 		}
 	}
 	if len(bip353Records) == 0 {
@@ -275,7 +280,20 @@ func ParseVerifiedProof(proofBytes []byte, hra types.HumanReadableAddress) (*typ
 	inst.OriginalAddress = hra
 	inst.DNSSECValidated = true
 	inst.RawTXTRecord = rawRecord
-	inst.TTL = vr.MaxCacheTTL
+	inst.TTL = ttl
 
 	return inst, nil
+}
+
+// maxProofBytes caps offline proofs passed to VerifyProof.
+const maxProofBytes = 1 << 20
+
+// safeVerify runs the FFI verifier, converting a Rust-side panic into an error.
+func safeVerify(proof []byte, name string) (out string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("dnssec verifier panic: %v", r)
+		}
+	}()
+	return dnssec.VerifyByteStream(proof, name), nil
 }

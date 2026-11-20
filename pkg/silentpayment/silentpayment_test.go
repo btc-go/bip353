@@ -1,6 +1,7 @@
 package silentpayment_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/btc-go/bip353/pkg/silentpayment"
@@ -54,5 +55,13 @@ func TestPrefixRecognition(t *testing.T) {
 				t.Errorf("prefix %q was not recognized", p)
 			}
 		})
+	}
+}
+
+func TestDecodeRejectsMixedCaseAndNonASCII(t *testing.T) {
+	for _, in := range []string{"Sp1qqqqqqqq", "sp1qqqqqqqQ", "sp1Kqqq", strings.Repeat("sp1q", 300)} {
+		if _, err := silentpayment.Decode(in); err == nil {
+			t.Errorf("accepted %q", in[:min(len(in), 20)])
+		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -33,12 +34,15 @@ func NewTorTransport(proxyAddr, dohProvider string) (*TorTransport, error) {
 	if proxyAddr == "" {
 		proxyAddr = TorDaemonProxy
 	}
-	if _, _, err := net.SplitHostPort(proxyAddr); err != nil {
+	host, _, err := net.SplitHostPort(proxyAddr)
+	if err != nil {
 		return nil, fmt.Errorf("tor: invalid proxy address %q: %w", proxyAddr, err)
+	}
+	if !isLoopbackHost(host) && os.Getenv("BIP353_ALLOW_REMOTE_TOR_PROXY") != "1" {
+		return nil, fmt.Errorf("tor: refusing non-loopback proxy %q (a remote SOCKS proxy is not Tor anonymity); set BIP353_ALLOW_REMOTE_TOR_PROXY=1 to override", proxyAddr)
 	}
 
 	var doh *DoHTransport
-	var err error
 	if strings.HasPrefix(dohProvider, "https://") {
 		doh, err = NewDoHTransportWithURL(dohProvider)
 	} else {
@@ -53,31 +57,15 @@ func NewTorTransport(proxyAddr, dohProvider string) (*TorTransport, error) {
 		return nil, fmt.Errorf("tor: SOCKS5 dialer for %s: %w", proxyAddr, err)
 	}
 
-	var dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
-	if cd, ok := torDialer.(proxy.ContextDialer); ok {
-		dialContext = cd.DialContext
-	} else {
-		dialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			type result struct {
-				conn net.Conn
-				err  error
-			}
-			ch := make(chan result, 1)
-			go func() {
-				c, err := torDialer.Dial(network, addr)
-				ch <- result{c, err}
-			}()
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case r := <-ch:
-				return r.conn, r.err
-			}
-		}
+	cd, ok := torDialer.(proxy.ContextDialer)
+	if !ok {
+		return nil, fmt.Errorf("tor: SOCKS5 dialer does not support contexts")
 	}
+	dialContext := cd.DialContext
 
 	doh.Client = &http.Client{
-		Timeout: DefaultTimeout,
+		Timeout:       DefaultTimeout,
+		CheckRedirect: noRedirect,
 		Transport: &http.Transport{
 			DialContext:           dialContext,
 			ForceAttemptHTTP2:     false,
@@ -107,4 +95,12 @@ func CheckTorProxy(proxyAddr string) error {
 	}
 	_ = conn.Close()
 	return nil
+}
+
+func isLoopbackHost(h string) bool {
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }

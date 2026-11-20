@@ -47,7 +47,10 @@ func NewTorTransport(proxy, provider string) (*tr.TorTransport, error) {
 func ParseAddress(address string) (HumanReadableAddress, error) {
 	return types.ParseHumanReadableAddress(address)
 }
-func DNSNameFor(address string) (string, error)     { return resolver.DNSNameFor(address) }
+func DNSNameFor(address string) (string, error) { return resolver.DNSNameFor(address) }
+
+// SanitizeText strips control/invisible characters from untrusted strings before display.
+func SanitizeText(s string) string                  { return types.SanitizeText(s) }
 func FormatSummary(inst *PaymentInstruction) string { return resolver.FormatSummary(inst) }
 func NewURIBuilder(onChainAddress string) *builder.URIBuilder {
 	return builder.NewURIBuilder(onChainAddress)

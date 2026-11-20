@@ -1,2 +1,5 @@
 /bip353
 *.test
+coverage.out
+*.out
+.env
